@@ -15,6 +15,20 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Jackchen0514/hysteria-manage
 
 只装面板用 `panel`，给其他服务器加节点用 `node`，查看全部参数用 `--help`，详见下方[一键安装说明](#一键安装cloudflare-域名--lets-encryptdns-01-验证)。
 
+## 一键更新
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Jackchen0514/hysteria-manager/main/update.sh)
+```
+
+在面板服务器和每台节点服务器上分别执行（同机部署执行一次即可），自动识别本机装了什么：
+
+- **面板**：更新到仓库最新提交；先在线备份数据库到 `/opt/hy2mgr/data/backups/`（保留最近 10 份），新版本启动失败自动回滚。已是最新则跳过
+- **节点**：更新节点同步程序 `hy2mgr-node-sync`（旧版安装的节点会补装），并把 hysteria 升级到最新版；hysteria 新版本启动失败自动回滚
+- 用户、配置、证书、密码都不变，不需要 Cloudflare Token
+
+可选参数：`--no-hysteria` 不升级 hysteria，`--hy-version v2.6.1` 指定 hysteria 版本，`--force` 强制重装面板代码。升级 hysteria 会重启节点，在线用户会断开几秒后自动重连。
+
 ## 工作原理
 
 ```

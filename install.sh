@@ -8,6 +8,7 @@
 #   bash install.sh node   --domain hk.example.com    --cf-token TOKEN --email you@mail.com \
 #                          --panel https://panel.example.com --api-token API_TOKEN [--name 香港]
 #   bash install.sh all    --domain panel.example.com --node-domain hk.example.com --cf-token TOKEN --email you@mail.com
+#   bash install.sh update [--no-hysteria] [--force]      (or: bash <(curl .../update.sh))
 #   bash install.sh uninstall panel|node
 #
 # Missing values are asked interactively. Run with --help for every option.
@@ -26,7 +27,8 @@ HY_DATA_DIR=/var/lib/hysteria
 HY_USER=hysteria
 ACME_HOME="${HOME:-/root}/.acme.sh"
 CF_API="${CF_API:-https://api.cloudflare.com/client/v4}"
-REPO_TARBALL="${HY2M_TARBALL:-https://github.com/Jackchen0514/hysteria-manager/archive/refs/heads/main.tar.gz}"
+REPO="${HY2M_REPO:-Jackchen0514/hysteria-manager}"
+BRANCH="${HY2M_BRANCH:-main}"
 
 # ---- options ---------------------------------------------------------------
 MODE="${1:-}"; [ $# -gt 0 ] && shift
@@ -35,7 +37,7 @@ if [ "$MODE" = uninstall ]; then UNINSTALL_WHAT="${1:-}"; [ $# -gt 0 ] && shift;
 DOMAIN=""; NODE_DOMAIN=""; CF_TOKEN="${CF_TOKEN:-}"; EMAIL=""
 PANEL_PORT=443; NODE_PORT=443; ADMIN_USER="admin"; ADMIN_PASS=""
 PANEL_URL=""; API_TOKEN=""; NODE_NAME=""; OBFS=""; STATS_PORT=9999; PORT_SET=0
-HY_VERSION=latest; DNS_RECORD=1
+HY_VERSION=latest; DNS_RECORD=1; UPDATE_HY=1; FORCE=0
 
 usage() { cat <<'EOF'
 Usage:
@@ -43,6 +45,7 @@ Usage:
   install.sh node   --domain hk.example.com --cf-token TOKEN --email you@mail.com \
                     --panel https://panel.example.com --api-token API_TOKEN [--name 香港]
   install.sh all    --domain panel.example.com --node-domain hk.example.com --cf-token TOKEN --email you@mail.com
+  install.sh update [--no-hysteria] [--force] [--hy-version V]
   install.sh uninstall panel|node
 
 Cloudflare API token permissions: Zone -> Zone -> Read, Zone -> DNS -> Edit
@@ -63,6 +66,8 @@ Options:
   --stats-port P      node: hysteria traffic stats API port (default 9999)
   --hy-version V      hysteria version, e.g. v2.6.1 (default latest)
   --no-dns            don't create/update the Cloudflare A record
+  --no-hysteria       update: don't upgrade the hysteria binary
+  --force             update: reinstall the panel code even if already up to date
 EOF
 }
 
@@ -84,6 +89,8 @@ while [ $# -gt 0 ]; do
     --stats-port) STATS_PORT="$2"; shift 2;;
     --hy-version) HY_VERSION="$2"; shift 2;;
     --no-dns) DNS_RECORD=0; shift;;
+    --no-hysteria) UPDATE_HY=0; shift;;
+    --force) FORCE=1; shift;;
     -h|--help) usage; exit 0;;
     *) echo "unknown option: $1"; usage; exit 1;;
   esac
@@ -196,19 +203,79 @@ open_port() {  # open_port PORT tcp|udp [from-ip]
   fi
 }
 
+# ---- source code -----------------------------------------------------------
+latest_sha() {
+  curl -fsSL -m 15 -H "Accept: application/vnd.github.sha" "https://api.github.com/repos/$REPO/commits/$BRANCH" 2>/dev/null
+}
+
+# Sets SRC_DIR (contains hy2mgr/) and SRC_SHA (commit, may be empty if unknown).
+fetch_source() {
+  if [ -f "$SCRIPT_DIR/hy2mgr/__main__.py" ]; then
+    SRC_DIR="$SCRIPT_DIR"
+    SRC_SHA="${HY2M_SRC_SHA:-$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)}"
+    return
+  fi
+  SRC_SHA="$(latest_sha || true)"
+  local url="https://github.com/$REPO/archive/${SRC_SHA:-refs/heads/$BRANCH}.tar.gz"
+  info "downloading panel code ${SRC_SHA:0:7}"
+  SRC_DIR="$(mktemp -d)"
+  curl -fsSL "$url" | tar -xz -C "$SRC_DIR" --strip-components=1 || die "download failed: $url"
+  [ -f "$SRC_DIR/hy2mgr/__main__.py" ] || die "downloaded archive does not contain hy2mgr/"
+}
+
+copy_panel_code() {
+  rm -rf "$PANEL_DIR/hy2mgr"
+  cp -r "$SRC_DIR/hy2mgr" "$PANEL_DIR/"
+  find "$PANEL_DIR/hy2mgr" -name __pycache__ -prune -exec rm -rf {} +
+  if [ -n "$SRC_SHA" ]; then echo "$SRC_SHA" > "$PANEL_DIR/VERSION"; fi
+}
+
+write_panel_unit() {
+  cat > /etc/systemd/system/hy2mgr.service <<EOF
+[Unit]
+Description=Hysteria2 Manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=$PANEL_USER
+Group=$PANEL_USER
+WorkingDirectory=$PANEL_DIR
+EnvironmentFile=$PANEL_DIR/.env
+ExecStart=$(command -v python3) -m hy2mgr
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+env_get() { sed -n "s/^$1=//p" "$PANEL_DIR/.env" 2>/dev/null | head -1; }
+
+# wait_panel: health check against the local panel using the values in .env
+wait_panel() {
+  local url host port tok
+  url="$(env_get HY2M_PUBLIC_URL)"; port="$(env_get HY2M_PORT)"; tok="$(env_get HY2M_API_TOKEN)"
+  host="$(echo "$url" | sed -E 's#^https?://([^/:]+).*#\1#')"
+  for _ in $(seq 1 20); do
+    if curl -fsS -m 3 --resolve "$host:$port:127.0.0.1" "$url/api/v1/stats" \
+         -H "Authorization: Bearer $tok" >/dev/null 2>&1; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
+
 # ---- panel -----------------------------------------------------------------
 install_panel() {
   ask DOMAIN "Panel domain (e.g. panel.example.com)"
   valid_domain "$DOMAIN" || die "invalid domain: $DOMAIN"
   ask EMAIL "ACME email"
   install_pkgs curl python3 openssl tar
-  local src="$SCRIPT_DIR"
-  if [ ! -f "$src/hy2mgr/__main__.py" ]; then   # e.g. run via bash <(curl ...)
-    info "downloading panel code"
-    src="$(mktemp -d)"
-    curl -fsSL "$REPO_TARBALL" | tar -xz -C "$src" --strip-components=1 || die "download failed: $REPO_TARBALL"
-    [ -f "$src/hy2mgr/__main__.py" ] || die "downloaded archive does not contain hy2mgr/"
-  fi
+  fetch_source
   if ! command -v crontab >/dev/null; then   # acme.sh needs cron for auto-renewal
     if command -v apt-get >/dev/null; then install_pkgs cron; else install_pkgs cronie; fi
     systemctl enable --now cron 2>/dev/null || systemctl enable --now crond 2>/dev/null || true
@@ -230,9 +297,7 @@ install_panel() {
 
   id "$PANEL_USER" >/dev/null 2>&1 || useradd --system --home-dir "$PANEL_DIR" --shell /usr/sbin/nologin "$PANEL_USER"
   mkdir -p "$PANEL_DIR/data" "$PANEL_DIR/certs"
-  rm -rf "$PANEL_DIR/hy2mgr"
-  cp -r "$src/hy2mgr" "$PANEL_DIR/"
-  find "$PANEL_DIR/hy2mgr" -name __pycache__ -prune -exec rm -rf {} +
+  copy_panel_code
 
   "$ACME_HOME/acme.sh" --install-cert -d "$DOMAIN" --ecc \
     --key-file "$PANEL_DIR/certs/key.pem" --fullchain-file "$PANEL_DIR/certs/fullchain.pem" \
@@ -267,40 +332,14 @@ EOF
   chown root:"$PANEL_USER" "$env"; chmod 640 "$env"
   chown -R "$PANEL_USER":"$PANEL_USER" "$PANEL_DIR/data"
 
-  cat > /etc/systemd/system/hy2mgr.service <<EOF
-[Unit]
-Description=Hysteria2 Manager
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-User=$PANEL_USER
-Group=$PANEL_USER
-WorkingDirectory=$PANEL_DIR
-EnvironmentFile=$PANEL_DIR/.env
-ExecStart=$(command -v python3) -m hy2mgr
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
-Restart=on-failure
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF
+  write_panel_unit
   systemctl daemon-reload
   systemctl enable hy2mgr >/dev/null 2>&1
   systemctl restart hy2mgr
   open_port "$PANEL_PORT" tcp
 
   info "waiting for panel"
-  local ok=0
-  for _ in $(seq 1 20); do
-    if curl -fsS -m 3 --resolve "$DOMAIN:$PANEL_PORT:127.0.0.1" "$url/api/v1/stats" \
-         -H "Authorization: Bearer $API_TOKEN" >/dev/null 2>&1; then ok=1; break; fi
-    sleep 1
-  done
-  [ $ok = 1 ] || die "panel did not start; see: journalctl -u hy2mgr -n 50"
+  wait_panel || die "panel did not start; see: journalctl -u hy2mgr -n 50"
   PANEL_SUMMARY="
   面板地址:   $url
   管理员:     $ADMIN_USER / $ADMIN_PASS
@@ -457,31 +496,11 @@ net.core.wmem_max = 16777216
 EOF
   sysctl -q -p /etc/sysctl.d/99-hysteria.conf || true
 
-  cat > /etc/systemd/system/hysteria-server.service <<EOF
-[Unit]
-Description=Hysteria2 Server
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-User=$HY_USER
-Group=$HY_USER
-WorkingDirectory=$HY_DATA_DIR
-Environment=HYSTERIA_LOG_LEVEL=info
-ExecStart=$HY_BIN server -c $conf
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
-NoNewPrivileges=true
-LimitNOFILE=1048576
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
+  write_hysteria_unit
   install_node_agent
   systemctl daemon-reload
   systemctl enable hysteria-server >/dev/null 2>&1
+  local started; started="$(date +%s)"
   systemctl restart hysteria-server
   systemctl enable --now hy2mgr-node-sync.timer >/dev/null 2>&1
 
@@ -494,13 +513,7 @@ EOF
   fi
 
   info "waiting for hysteria to obtain the certificate (DNS-01 can take ~1 min)"
-  local ok=0
-  for _ in $(seq 1 90); do
-    systemctl is-active -q hysteria-server || break
-    if journalctl -u hysteria-server --since "-3min" --no-pager 2>/dev/null | grep -q "server up and running"; then ok=1; break; fi
-    sleep 2
-  done
-  if [ $ok != 1 ]; then
+  if ! wait_hysteria "$started"; then
     journalctl -u hysteria-server -n 20 --no-pager || true
     die "hysteria did not start; see: journalctl -u hysteria-server -n 50"
   fi
@@ -525,6 +538,46 @@ EOF
     NODE_SUMMARY="$NODE_SUMMARY
   ${c_ylw}注意: 云服务器安全组需放行 UDP $NODE_PORT，以及来自面板的 TCP $STATS_PORT${c_off}"
   fi
+}
+
+write_hysteria_unit() {
+  cat > /etc/systemd/system/hysteria-server.service <<EOF
+[Unit]
+Description=Hysteria2 Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=$HY_USER
+Group=$HY_USER
+WorkingDirectory=$HY_DATA_DIR
+Environment=HYSTERIA_LOG_LEVEL=info
+ExecStart=$HY_BIN server -c $HY_CONF_DIR/config.yaml
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=true
+LimitNOFILE=1048576
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+# wait_hysteria SINCE_EPOCH: wait until hysteria logs "server up and running" after SINCE_EPOCH
+wait_hysteria() {
+  for _ in $(seq 1 90); do
+    systemctl is-active -q hysteria-server || return 1
+    if journalctl -u hysteria-server --since "@$1" --no-pager 2>/dev/null | grep -q "server up and running"; then return 0; fi
+    sleep 2
+  done
+  return 1
+}
+
+latest_hysteria_version() {
+  curl -fsSLI -m 20 -o /dev/null -w '%{url_effective}' https://github.com/apernet/hysteria/releases/latest 2>/dev/null \
+    | sed -n 's#.*/tag/app/\(v[0-9][0-9.]*\)$#\1#p'
 }
 
 # Agent that pulls port / obfs settings from the panel and applies them to config.yaml.
@@ -651,6 +704,108 @@ WantedBy=timers.target
 EOF
 }
 
+# ---- update ----------------------------------------------------------------
+update_panel() {
+  local cur; cur="$(cat "$PANEL_DIR/VERSION" 2>/dev/null || true)"
+  if [ -n "$SRC_SHA" ] && [ "$cur" = "$SRC_SHA" ] && [ "$FORCE" != 1 ]; then
+    info "panel is up to date (${SRC_SHA:0:7})"
+    UPDATE_SUMMARY="$UPDATE_SUMMARY
+  面板:       已是最新 ${SRC_SHA:0:7}"
+    return
+  fi
+  info "updating panel ${cur:0:7} -> ${SRC_SHA:-latest}"
+
+  # online backup of the database (safe while the panel is running)
+  local db bak_dir bak
+  db="$(env_get HY2M_DB)"; db="${db:-$PANEL_DIR/data/hy2mgr.db}"
+  bak_dir="$PANEL_DIR/data/backups"; bak="$bak_dir/hy2mgr-$(date +%Y%m%d-%H%M%S).db"
+  if [ -f "$db" ]; then
+    mkdir -p "$bak_dir"
+    python3 -c 'import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connect(sys.argv[2]); s.backup(d); d.close()' "$db" "$bak" \
+      || die "database backup failed"
+    chown -R "$PANEL_USER":"$PANEL_USER" "$bak_dir"
+    # keep the 10 newest backups
+    find "$bak_dir" -name 'hy2mgr-*.db' | sort -r | tail -n +11 | xargs -r rm -f
+    info "database backed up to $bak"
+  fi
+
+  rm -rf "$PANEL_DIR/hy2mgr.bak"
+  cp -a "$PANEL_DIR/hy2mgr" "$PANEL_DIR/hy2mgr.bak"
+  [ -f "$PANEL_DIR/VERSION" ] && cp -a "$PANEL_DIR/VERSION" "$PANEL_DIR/VERSION.bak"
+  copy_panel_code
+  write_panel_unit
+  systemctl daemon-reload
+  systemctl restart hy2mgr
+  if wait_panel; then
+    rm -rf "$PANEL_DIR/hy2mgr.bak" "$PANEL_DIR/VERSION.bak"
+    UPDATE_SUMMARY="$UPDATE_SUMMARY
+  面板:       ${cur:0:7} -> ${SRC_SHA:0:7}  (数据库备份: $bak)"
+  else
+    warn "new panel version failed to start, rolling back"
+    journalctl -u hy2mgr -n 20 --no-pager 2>/dev/null || true
+    rm -rf "$PANEL_DIR/hy2mgr"; mv "$PANEL_DIR/hy2mgr.bak" "$PANEL_DIR/hy2mgr"
+    if [ -f "$PANEL_DIR/VERSION.bak" ]; then mv -f "$PANEL_DIR/VERSION.bak" "$PANEL_DIR/VERSION"; else rm -f "$PANEL_DIR/VERSION"; fi
+    systemctl restart hy2mgr
+    if wait_panel; then
+      die "update failed; rolled back to ${cur:0:7} (running). Database backup: $bak"
+    fi
+    die "update failed and the old version did not start either; see journalctl -u hy2mgr. Database backup: $bak"
+  fi
+}
+
+update_node() {
+  info "updating node sync agent"
+  install_node_agent
+  write_hysteria_unit
+  systemctl daemon-reload
+  systemctl enable --now hy2mgr-node-sync.timer >/dev/null 2>&1
+  local line="  节点同步:   hy2mgr-node-sync 已更新"
+
+  if [ "$UPDATE_HY" = 1 ]; then
+    local cur want
+    cur="$("$HY_BIN" version 2>/dev/null | sed -n 's/^Version:[[:space:]]*//p')"
+    want="$HY_VERSION"; [ "$want" = latest ] && want="$(latest_hysteria_version)"
+    if [ -z "$want" ]; then
+      warn "cannot determine the latest hysteria version, skipping hysteria upgrade"
+    elif [ "$cur" = "$want" ]; then
+      info "hysteria is up to date ($cur)"
+      line="$line
+  hysteria:   已是最新 $cur"
+    else
+      info "upgrading hysteria $cur -> $want"
+      cp -a "$HY_BIN" "$HY_BIN.bak"
+      HY_VERSION="$want" install_hysteria_bin
+      local started; started="$(date +%s)"
+      systemctl restart hysteria-server
+      if wait_hysteria "$started"; then
+        rm -f "$HY_BIN.bak"
+        line="$line
+  hysteria:   $cur -> $want"
+      else
+        warn "hysteria $want failed to start, rolling back to $cur"
+        journalctl -u hysteria-server -n 20 --no-pager 2>/dev/null || true
+        mv -f "$HY_BIN.bak" "$HY_BIN"
+        systemctl restart hysteria-server
+        line="$line
+  hysteria:   升级到 $want 失败，已回滚到 $cur"
+      fi
+    fi
+  fi
+  systemctl start hy2mgr-node-sync >/dev/null 2>&1 || true
+  UPDATE_SUMMARY="$UPDATE_SUMMARY
+$line"
+}
+
+update_all() {
+  local panel=0 node=0
+  [ -f /etc/systemd/system/hy2mgr.service ] && [ -d "$PANEL_DIR/hy2mgr" ] && panel=1
+  [ -f /etc/systemd/system/hysteria-server.service ] && [ -f "$HY_CONF_DIR/config.yaml" ] && node=1
+  [ $panel = 1 ] || [ $node = 1 ] || die "nothing to update: neither the panel nor a node was installed by install.sh"
+  install_pkgs curl python3 tar
+  if [ $panel = 1 ]; then fetch_source; update_panel; fi
+  if [ $node = 1 ]; then update_node; fi
+}
+
 uninstall() {
   case "${1:-}" in
     panel)
@@ -672,7 +827,7 @@ uninstall() {
 }
 
 # ---- main ------------------------------------------------------------------
-PANEL_SUMMARY=""; NODE_SUMMARY=""
+PANEL_SUMMARY=""; NODE_SUMMARY=""; UPDATE_SUMMARY=""; SRC_DIR=""; SRC_SHA=""
 case "$MODE" in
   panel) need_root; install_panel;;
   node)  need_root; install_node;;
@@ -688,6 +843,9 @@ case "$MODE" in
     PANEL_RESOLVE="$PANEL_DOMAIN:$PANEL_PORT:127.0.0.1"
     [ "$NODE_PORT" = "$PANEL_PORT" ] && info "panel uses TCP $PANEL_PORT, hysteria uses UDP $NODE_PORT — no conflict"
     install_node;;
+  update)
+    need_root; update_all
+    echo; info "更新完成"; echo "$UPDATE_SUMMARY"; echo; exit 0;;
   uninstall) need_root; uninstall "$UNINSTALL_WHAT"; exit 0;;
   ""|-h|--help) usage; exit 0;;
   *) usage; exit 1;;
