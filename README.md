@@ -5,6 +5,16 @@ Hysteria2 的多节点用户管理平台：Web 管理面板 + REST API，支持�
 - **零依赖**：只用 Python 3.8+ 标准库（sqlite3 + http.server），拷过去就能跑
 - **对接方式**：使用 Hysteria2 官方的 [HTTP 认证](https://v2.hysteria.network/docs/advanced/Full-Server-Config/#http) 和 [流量统计 API](https://v2.hysteria.network/docs/advanced/Traffic-Stats-API/)，节点端不需要装额外程序
 
+## 一键安装
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Jackchen0514/hysteria-manager/main/install.sh) all
+```
+
+以 root 运行，按提示输入面板域名、节点域名、Cloudflare API Token 和邮箱即可：自动配置 DNS、申请 Let's Encrypt 证书（DNS-01）、安装面板和 Hysteria2 节点。
+
+只装面板用 `panel`，给其他服务器加节点用 `node`，查看全部参数用 `--help`，详见下方[一键安装说明](#一键安装cloudflare-域名--lets-encryptdns-01-验证)。
+
 ## 工作原理
 
 ```
