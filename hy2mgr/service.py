@@ -249,11 +249,17 @@ class Service:
         if node["obfs_password"]:
             q["obfs"] = "salamander"
             q["obfs-password"] = node["obfs_password"]
+        port = node["port"]
+        if node["hop_ports"]:
+            # Single port in the authority + mport: parsed by v2rayN / NekoBox style clients,
+            # clients without hopping support still connect to the listen port.
+            port = str(self._split_port(node["port"])[0])
+            q["mport"] = node["hop_ports"]
         host = node["address"]
         if ":" in host and not host.startswith("["):
             host = "[%s]" % host
         return "hysteria2://%s@%s:%s/%s#%s" % (
-            urllib.parse.quote(u["password"], safe=""), host, node["port"],
+            urllib.parse.quote(u["password"], safe=""), host, port,
             ("?" + urllib.parse.urlencode(q)) if q else "",
             urllib.parse.quote(node["name"]),
         )
@@ -268,10 +274,13 @@ class Service:
         lines = ["proxies:"]
         for n in nodes:
             port, ports = self._split_port(n["port"])
+            ports = n["hop_ports"] or ports
             lines += ["  - name: %s" % s(n["name"]), "    type: hysteria2",
                       "    server: %s" % s(n["address"]), "    port: %d" % port]
             if ports:
                 lines.append("    ports: %s" % s(ports.replace(",", "/")))
+            if n["hop_ports"]:
+                lines.append("    hop-interval: %d" % n["hop_interval"])
             lines.append("    password: %s" % s(u["password"]))
             if n["sni"]:
                 lines.append("    sni: %s" % s(n["sni"]))

@@ -79,7 +79,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Jackchen0514/hysteria-manage
 # 在其他服务器上加节点，自动注册到面板
 bash <(curl -fsSL https://raw.githubusercontent.com/Jackchen0514/hysteria-manager/main/install.sh) node \
      --domain jp.example.com --cf-token <CF_TOKEN> --email you@mail.com \
-     --panel https://panel.example.com --api-token <面板 API Token> --name 日本 [--obfs]
+     --panel https://panel.example.com --api-token <面板 API Token> --name 日本 [--obfs] [--hop 20000-30000]
 ```
 
 在仓库目录内执行：
@@ -93,7 +93,7 @@ bash install.sh panel --domain panel.example.com --cf-token <CF_TOKEN> --email y
 
 # 加节点
 bash install.sh node --domain jp.example.com --cf-token <CF_TOKEN> --email you@mail.com \
-     --panel https://panel.example.com --api-token <面板 API Token> --name 日本 [--obfs]
+     --panel https://panel.example.com --api-token <面板 API Token> --name 日本 [--obfs] [--hop 20000-30000]
 
 # 卸载
 bash install.sh uninstall panel|node
@@ -143,16 +143,26 @@ trafficStats:
 
 3. 节点的 `9999` 端口只需对面板开放（防火墙限制来源 IP）。节点也必须能访问面板的回调地址。
 
-### 在面板修改端口 / 混淆
+### 在面板修改端口 / 混淆 / 端口跳跃
 
-用 `install.sh` 安装的节点带有同步程序 `hy2mgr-node-sync`（systemd timer，每分钟一次）：从面板拉取该节点的端口和混淆密码，与 `/etc/hysteria/config.yaml` 不一致时自动改写并重启 hysteria。
+用 `install.sh` 安装的节点带有同步程序 `hy2mgr-node-sync`（systemd timer，每分钟一次）：从面板拉取该节点的端口、混淆密码和端口跳跃范围，与 `/etc/hysteria/config.yaml` 不一致时自动改写并重启 hysteria，并维护端口跳跃的 iptables 规则。
 
 - 节点列表的「配置下发」一列显示状态：**已应用** / **待应用** / **未安装同步**（手动部署的节点需自己改 `config.yaml`）
 - 新配置启动失败会自动回滚到旧配置，并且不会每分钟反复重试，直到面板里的设置再次修改
 - 本机 ufw / firewalld 会自动放行新端口，**云服务器安全组需要自己放行**
-- 填写端口范围（如 `20000-30000`）时 hysteria 只监听第一个端口，端口跳跃所需的 iptables 转发规则需自行配置
+- 重新执行 `install.sh` 同样会保留面板里的端口跳跃设置，除非显式传入 `--hop`
 - 手动触发：`systemctl start hy2mgr-node-sync`，查看日志：`journalctl -u hy2mgr-node-sync`
 - 重新执行 `install.sh` 会保留面板里设置的端口和混淆，除非显式传入 `--port` / `--obfs` / `--no-obfs`
+
+### 端口跳跃
+
+在节点设置里填写「端口跳跃」范围（如 `20000-30000`，多段用逗号分隔），或安装时加 `--hop 20000-30000`：
+
+- 节点上的 `hy2mgr-node-sync` 会在 iptables `nat` 表建立 `HY2MGR_HOP` 链，把这段 UDP 端口 `REDIRECT` 到 hysteria 的监听端口（IPv6 尽力而为）；每分钟检查一次，重启后自动恢复，修改监听端口后规则自动跟随
+- 订阅链接：通用订阅写成 `hysteria2://...@host:监听端口/?mport=20000-30000`（v2rayN、NekoBox 等识别 `mport`，不支持的客户端仍可直连监听端口）；Clash Meta 订阅写入 `ports` 和 `hop-interval`
+- 「跳跃间隔」是客户端切换端口的间隔（秒），只用于 Clash Meta 订阅
+- **云服务器安全组需要放行这段 UDP 端口**；本机 ufw / firewalld 无需额外放行（转发后目标是监听端口）
+- 节点列表的「配置下发」在规则生效后才显示「已应用」
 
 ## 订阅
 
@@ -244,7 +254,7 @@ token 为 `HY2M_API_TOKEN`，或调用 login 获得的会话 token。请求和�
 
 ### 节点字段
 
-`name`（必填）、`address`（必填）、`port`（`443` / `20000-30000` / `443,8443`）、`sni`、`insecure`、`obfs_password`、`api_url`、`api_secret`、`enabled`、`sort`
+`name`（必填）、`address`（必填）、`port`（监听端口，如 `443`）、`hop_ports`（端口跳跃范围，如 `20000-30000` 或 `20000-30000,40000-41000`，空 = 关闭）、`hop_interval`（跳跃间隔秒数，5-3600，默认 30）、`sni`、`insecure`、`obfs_password`、`api_url`、`api_secret`、`enabled`、`sort`
 
 ### 示例
 

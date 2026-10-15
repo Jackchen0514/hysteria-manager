@@ -99,7 +99,18 @@ def parse_user_input(body, creating):
     return out
 
 
-NODE_STR = ("name", "address", "port", "sni", "obfs_password", "api_url", "api_secret")
+NODE_STR = ("name", "address", "port", "sni", "obfs_password", "hop_ports", "api_url", "api_secret")
+
+
+def _check_ranges(spec, name):
+    """'20000-30000' or '20000-30000,40000-41000' (single ports allowed)."""
+    if not re.match(r"^\d+(-\d+)?(,\d+(-\d+)?)*$", spec):
+        raise APIError(400, "%s must look like 20000-30000 or 20000-30000,40000-41000" % name)
+    for part in spec.split(","):
+        a, _, b = part.partition("-")
+        a, b = int(a), int(b or a)
+        if not (1 <= a <= b <= 65535):
+            raise APIError(400, "%s: invalid range %s" % (name, part))
 
 
 def parse_node_input(body, creating):
@@ -109,6 +120,11 @@ def parse_node_input(body, creating):
             out[k] = str(body[k] if body[k] is not None else "").strip()
     if "port" in out and not re.match(r"^\d+([-,]\d+)*$", out["port"]):
         raise APIError(400, "port must look like 443, 20000-30000 or 443,8443")
+    if out.get("hop_ports"):
+        out["hop_ports"] = out["hop_ports"].replace(" ", "").replace(":", "-")
+        _check_ranges(out["hop_ports"], "hop_ports")
+    if "hop_interval" in body:
+        out["hop_interval"] = _int(body["hop_interval"], "hop_interval", 5, 3600)
     for k in ("insecure", "enabled"):
         if k in body:
             out[k] = int(bool(body[k]))
@@ -280,7 +296,7 @@ def present_node(n):
     # Whether the node sync agent has applied the current port / obfs settings.
     listen_port = str(Service._split_port(n["port"])[0])
     n["agent_synced"] = bool(n["agent_seen_at"]) and n["agent_port"] == listen_port \
-        and n["agent_obfs"] == n["obfs_password"]
+        and n["agent_obfs"] == n["obfs_password"] and n["agent_hop"] == n["hop_ports"]
     n.pop("agent_obfs")
     return n
 
@@ -337,14 +353,14 @@ def api_node_config(h, svc, m, body):
 # ---- node sync agent ----
 @route("GET", "/hy2/node/{token}/config", auth=False)
 def hy2_node_config(h, svc, m, body):
-    """Polled by hy2mgr-node-sync on each node. Query: port / obfs = what is applied now."""
+    """Polled by hy2mgr-node-sync on each node. Query: port / obfs / hop = what is applied now."""
     n = svc.db.get_node_by_token(m["token"])
     if not n:
         raise APIError(404, "not found")
     svc.db.update_node(n["id"], {"agent_seen_at": now(), "agent_port": h.query.get("port", ""),
-                                 "agent_obfs": h.query.get("obfs", "")})
+                                 "agent_obfs": h.query.get("obfs", ""), "agent_hop": h.query.get("hop", "")})
     return {"listen_port": Service._split_port(n["port"])[0], "port": n["port"],
-            "obfs_password": n["obfs_password"]}
+            "obfs_password": n["obfs_password"], "hop_ports": n["hop_ports"]}
 
 
 # ---- hysteria2 auth callback ----

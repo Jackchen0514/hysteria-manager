@@ -36,7 +36,7 @@ UNINSTALL_WHAT=""
 if [ "$MODE" = uninstall ]; then UNINSTALL_WHAT="${1:-}"; [ $# -gt 0 ] && shift; fi
 DOMAIN=""; NODE_DOMAIN=""; CF_TOKEN="${CF_TOKEN:-}"; EMAIL=""
 PANEL_PORT=443; NODE_PORT=443; ADMIN_USER="admin"; ADMIN_PASS=""
-PANEL_URL=""; API_TOKEN=""; NODE_NAME=""; OBFS=""; STATS_PORT=9999; PORT_SET=0
+PANEL_URL=""; API_TOKEN=""; NODE_NAME=""; OBFS=""; STATS_PORT=9999; PORT_SET=0; HOP=""; HOP_SET=0
 HY_VERSION=latest; DNS_RECORD=1; UPDATE_HY=1; FORCE=0
 
 usage() { cat <<'EOF'
@@ -63,6 +63,7 @@ Options:
   --api-token T       node: panel API token (HY2M_API_TOKEN of the panel)
   --name N            node: display name (default: node domain)
   --obfs / --no-obfs  node: enable / disable salamander obfuscation (default: keep the panel's setting)
+  --hop RANGE         node: port hopping, e.g. 20000-30000 ("" disables; default: keep the panel's setting)
   --stats-port P      node: hysteria traffic stats API port (default 9999)
   --hy-version V      hysteria version, e.g. v2.6.1 (default latest)
   --no-dns            don't create/update the Cloudflare A record
@@ -86,6 +87,7 @@ while [ $# -gt 0 ]; do
     --name) NODE_NAME="$2"; shift 2;;
     --obfs) OBFS=1; shift;;
     --no-obfs) OBFS=0; shift;;
+    --hop) HOP="$2"; HOP_SET=1; shift 2;;
     --stats-port) STATS_PORT="$2"; shift 2;;
     --hy-version) HY_VERSION="$2"; shift 2;;
     --no-dns) DNS_RECORD=0; shift;;
@@ -392,6 +394,7 @@ install_node() {
   ask API_TOKEN "Panel API token" secret
   NODE_NAME="${NODE_NAME:-$DOMAIN}"
   install_pkgs curl python3
+  command -v iptables >/dev/null || install_pkgs iptables || warn "iptables not available: port hopping will not work"
   setup_cloudflare "$DOMAIN"
 
   info "checking panel API"
@@ -408,15 +411,16 @@ install_node() {
   secret="${secret:-$(rand 32)}"
 
   # An already registered node keeps the port / obfs set in the panel unless overridden here.
-  local existing="" cur_port="" cur_obfs=""
-  IFS=$'\t' read -r existing cur_port cur_obfs < <(panel_api GET /nodes | ADDR="$DOMAIN" python3 -c '
+  local existing="" cur_port="" cur_obfs="" cur_hop=""
+  IFS=$'\x1f' read -r existing cur_port cur_obfs cur_hop < <(panel_api GET /nodes | ADDR="$DOMAIN" python3 -c '
 import json, os, sys
 for n in json.load(sys.stdin)["items"]:
     if n["address"] == os.environ["ADDR"]:
-        print("%s\t%s\t%s" % (n["id"], n["port"], n["obfs_password"])); break') || true
+        print("\x1f".join(str(n.get(k, "")) for k in ("id", "port", "obfs_password", "hop_ports"))); break') || true
   if [ -n "$existing" ]; then
     [ "$PORT_SET" = 1 ] || port_spec="$cur_port"
     [ "$OBFS" = 0 ] || obfs_pw="$cur_obfs"
+    [ "$HOP_SET" = 1 ] || HOP="$cur_hop"
   fi
   if [ "$OBFS" = 1 ] && [ -z "$obfs_pw" ]; then obfs_pw="$(rand 24)"; fi
   NODE_PORT="${port_spec%%[-,]*}"   # hysteria listens on the first port of a range / list
@@ -433,15 +437,16 @@ for n in json.load(sys.stdin)["items"]:
   # register (or update) the node on the panel
   info "registering node on panel"
   local body node_json
-  body="$(NAME="$NODE_NAME" ADDR="$DOMAIN" PORT="$port_spec" OBFS="$obfs_pw" URL="$stats_url" SEC="$secret" python3 -c '
+  body="$(NAME="$NODE_NAME" ADDR="$DOMAIN" PORT="$port_spec" OBFS="$obfs_pw" HOP="$HOP" URL="$stats_url" SEC="$secret" python3 -c '
 import json, os
 print(json.dumps({"name": os.environ["NAME"], "address": os.environ["ADDR"], "port": os.environ["PORT"],
                   "sni": os.environ["ADDR"], "insecure": False, "obfs_password": os.environ["OBFS"],
+                  "hop_ports": os.environ["HOP"],
                   "api_url": os.environ["URL"], "api_secret": os.environ["SEC"], "enabled": True}))')"
   if [ -n "$existing" ]; then
-    node_json="$(panel_api PATCH "/nodes/$existing" "$body")"
+    node_json="$(panel_api PATCH "/nodes/$existing" "$body")" || die "panel rejected the node settings (check --port / --hop)"
   else
-    node_json="$(panel_api POST /nodes "$body")"
+    node_json="$(panel_api POST /nodes "$body")" || die "panel rejected the node settings (check --port / --hop)"
   fi
   local auth_token
   auth_token="$(echo "$node_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["auth_token"])')"
@@ -518,6 +523,9 @@ EOF
     die "hysteria did not start; see: journalctl -u hysteria-server -n 50"
   fi
 
+  # apply port hopping rules (and report the state to the panel) right away
+  systemctl start hy2mgr-node-sync >/dev/null 2>&1 || warn "hy2mgr-node-sync failed; see: journalctl -u hy2mgr-node-sync"
+
   info "testing panel -> node stats API"
   local node_id; node_id="$(echo "$node_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
   if ! panel_api POST "/nodes/$node_id/sync" >/dev/null 2>&1; then
@@ -529,14 +537,14 @@ EOF
   fi
 
   NODE_SUMMARY="
-  节点:       $NODE_NAME ($DOMAIN:$NODE_PORT/udp)
+  节点:       $NODE_NAME ($DOMAIN:$NODE_PORT/udp${HOP:+，端口跳跃 $HOP})
   配置文件:   $conf  (面板修改端口/混淆后由 hy2mgr-node-sync 每分钟自动同步)
   证书:       hysteria 内置 ACME (Cloudflare DNS-01)，自动续期
   统计 API:   $stats_url  (仅需对面板开放)
   日志:       journalctl -u hysteria-server -f"
   if [ $local_panel = 0 ]; then
     NODE_SUMMARY="$NODE_SUMMARY
-  ${c_ylw}注意: 云服务器安全组需放行 UDP $NODE_PORT，以及来自面板的 TCP $STATS_PORT${c_off}"
+  ${c_ylw}注意: 云服务器安全组需放行 UDP $NODE_PORT${HOP:+ 和 UDP $HOP}，以及来自面板的 TCP $STATS_PORT${c_off}"
   fi
 }
 
@@ -584,14 +592,17 @@ latest_hysteria_version() {
 install_node_agent() {
   cat > /usr/local/bin/hy2mgr-node-sync <<'AGENT'
 #!/usr/bin/env python3
-"""Pull this node's port / obfs settings from the hy2mgr panel and apply them to the
-hysteria config. Rolls back if hysteria fails to start with the new config."""
+"""Pull this node's port / obfs / port-hopping settings from the hy2mgr panel and apply
+them: port and obfs go into the hysteria config (rolled back if hysteria fails to start),
+port hopping is an iptables REDIRECT of a UDP port range to the listen port. Runs every
+minute, so the NAT rules are restored after a reboot."""
 import json, os, re, shutil, subprocess, sys, time, urllib.parse, urllib.request
 
 CONF = os.environ.get("HY_CONF", "/etc/hysteria/config.yaml")
 SERVICE = "hysteria-server"
 # Settings that failed to start are remembered so we don't restart-loop every minute.
 FAILED = os.environ.get("HY_SYNC_FAILED", "/run/hy2mgr-node-sync.failed")
+CHAIN = "HY2MGR_HOP"
 OBFS_RE = re.compile(r"^obfs:\n(?:[ \t]+.*\n)*\n?", re.M)
 
 
@@ -608,8 +619,8 @@ def current(text):
     return port, obfs
 
 
-def fetch(base, token, port, obfs):
-    q = urllib.parse.urlencode({"port": port, "obfs": obfs})
+def fetch(base, token, port, obfs, hop):
+    q = urllib.parse.urlencode({"port": port, "obfs": obfs, "hop": hop})
     with urllib.request.urlopen("%s/hy2/node/%s/config?%s" % (base, token, q), timeout=15) as r:
         return json.load(r)
 
@@ -621,6 +632,55 @@ def open_firewall(port):
         ok(["ufw", "allow", "%s/udp" % port])
     elif shutil.which("firewall-cmd") and ok(["firewall-cmd", "--state"]):
         ok(["firewall-cmd", "--permanent", "--add-port=%s/udp" % port]) and ok(["firewall-cmd", "--reload"])
+
+
+def ipt(tool, *args):
+    return subprocess.run([tool, "-w", "-t", "nat"] + list(args), stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE)
+
+
+def hop_rules_ok(listen, spec):
+    """True if the IPv4 NAT chain already redirects exactly `spec` to `listen`."""
+    r = ipt("iptables", "-S", CHAIN)
+    rules = r.stdout.decode() if r.returncode == 0 else ""
+    if not spec:
+        return "-A " not in rules
+    sig = "hy2mgr:%s:%s" % (listen, spec)
+    return re.search(re.escape(sig) + r'(?=["\s]|$)', rules) is not None and \
+        ipt("iptables", "-C", "PREROUTING", "-j", CHAIN).returncode == 0
+
+
+def ensure_hop(listen, spec):
+    """Redirect UDP ports in `spec` (e.g. 20000-30000,40000-41000) to `listen`.
+    Returns the spec now in effect ("" if disabled or not applicable)."""
+    if not shutil.which("iptables"):
+        if spec:
+            print("iptables not found, port hopping not applied", file=sys.stderr)
+        return ""
+    if hop_rules_ok(listen, spec):
+        return spec
+    sig = "hy2mgr:%s:%s" % (listen, spec)
+    for tool in ("iptables", "ip6tables"):
+        if not shutil.which(tool):
+            continue
+        ipt(tool, "-N", CHAIN)
+        ipt(tool, "-F", CHAIN)
+        errs = []
+        for part in spec.split(",") if spec else []:
+            r = ipt(tool, "-A", CHAIN, "-p", "udp", "--dport", part.replace("-", ":"),
+                    "-m", "comment", "--comment", sig, "-j", "REDIRECT", "--to-ports", str(listen))
+            if r.returncode:
+                errs.append(r.stderr.decode().strip())
+        if spec and ipt(tool, "-C", "PREROUTING", "-j", CHAIN).returncode:
+            r = ipt(tool, "-I", "PREROUTING", "-j", CHAIN)
+            if r.returncode:
+                errs.append(r.stderr.decode().strip())
+        if errs and tool == "iptables":  # IPv6 NAT is best effort
+            ipt(tool, "-F", CHAIN)
+            print("port hopping rules failed: %s" % "; ".join(errs), file=sys.stderr)
+            return ""
+    print("port hopping: udp %s -> %s" % (spec, listen) if spec else "port hopping disabled")
+    return spec
 
 
 def write(text, ref):
@@ -646,34 +706,56 @@ def main():
         sys.exit("hy2mgr auth url not found in " + CONF)
     base, token = m.group(1), m.group(2)
     port, obfs = current(text)
-    want = fetch(base, token, port, obfs)
+    hop = spec_if_ok(port)
+    before = (port, obfs, hop)
+    want = fetch(base, token, port, obfs, hop)
     new_port, new_obfs = str(want["listen_port"]), want.get("obfs_password") or ""
-    if (new_port, new_obfs) == (port, obfs):
-        return
+    new_hop = want.get("hop_ports") or ""
+    error = None
+
+    if (new_port, new_obfs) != (port, obfs) and not failed_before(new_port, new_obfs):
+        new = re.sub(r"^listen:.*$", "listen: :" + new_port, text, count=1, flags=re.M)
+        new = OBFS_RE.sub("", new)
+        if new_obfs:
+            block = "obfs:\n  type: salamander\n  salamander:\n    password: %s\n\n" % json.dumps(new_obfs)
+            new = re.sub(r"^auth:", lambda _: block + "auth:", new, count=1, flags=re.M)
+        write(new, CONF)
+        if new_port != port:
+            open_firewall(new_port)
+        if restart_ok():
+            print("applied: port %s -> %s, obfs %s" % (port, new_port, "on" if new_obfs else "off"))
+            port, obfs = new_port, new_obfs
+        else:
+            write(text, CONF)
+            restart_ok()
+            with open(FAILED, "w") as f:
+                json.dump([new_port, new_obfs], f)
+            error = ("hysteria failed to start with the new settings (port %s); rolled back, "
+                     "fix them in the panel (see journalctl -u %s)" % (new_port, SERVICE))
+
+    # Port hopping always targets the listen port actually in use.
+    applied_hop = ensure_hop(port, new_hop)
+    if (port, obfs, applied_hop) != before:
+        fetch(base, token, port, obfs, applied_hop)  # report the applied state
+    if error:
+        sys.exit(error)
+
+
+def spec_if_ok(port):
+    """The hop spec currently in effect for `port`, read back from the NAT chain."""
+    if not shutil.which("iptables"):
+        return ""
+    r = ipt("iptables", "-S", CHAIN)
+    m = re.search(r"hy2mgr:%s:([0-9,-]+)" % re.escape(port), r.stdout.decode() if r.returncode == 0 else "")
+    return m.group(1) if m and hop_rules_ok(port, m.group(1)) else ""
+
+
+def failed_before(new_port, new_obfs):
     try:
         with open(FAILED) as f:
-            if json.load(f) == [new_port, new_obfs]:
-                return  # already failed with these settings; wait until they change in the panel
+            return json.load(f) == [new_port, new_obfs]
     except (OSError, ValueError):
-        pass
-    new = re.sub(r"^listen:.*$", "listen: :" + new_port, text, count=1, flags=re.M)
-    new = OBFS_RE.sub("", new)
-    if new_obfs:
-        block = "obfs:\n  type: salamander\n  salamander:\n    password: %s\n\n" % json.dumps(new_obfs)
-        new = re.sub(r"^auth:", lambda _: block + "auth:", new, count=1, flags=re.M)
-    write(new, CONF)
-    if new_port != port:
-        open_firewall(new_port)
-    if restart_ok():
-        print("applied: port %s -> %s, obfs %s" % (port, new_port, "on" if new_obfs else "off"))
-        fetch(base, token, new_port, new_obfs)  # report the applied state
-    else:
-        write(text, CONF)
-        restart_ok()
-        with open(FAILED, "w") as f:
-            json.dump([new_port, new_obfs], f)
-        sys.exit("hysteria failed to start with the new settings (port %s); rolled back, "
-                 "fix them in the panel (see journalctl -u %s)" % (new_port, SERVICE))
+        return False
 
 
 if __name__ == "__main__":
@@ -754,6 +836,7 @@ update_panel() {
 }
 
 update_node() {
+  command -v iptables >/dev/null || install_pkgs iptables || warn "iptables not available: port hopping will not work"
   info "updating node sync agent"
   install_node_agent
   write_hysteria_unit
@@ -817,6 +900,12 @@ uninstall() {
       info "panel removed. Database kept at $PANEL_DIR/data (delete it manually if not needed)";;
     node)
       systemctl disable --now hy2mgr-node-sync.timer hysteria-server 2>/dev/null || true
+      for t in iptables ip6tables; do   # port hopping NAT rules
+        command -v "$t" >/dev/null || continue
+        "$t" -w -t nat -D PREROUTING -j HY2MGR_HOP 2>/dev/null || true
+        "$t" -w -t nat -F HY2MGR_HOP 2>/dev/null || true
+        "$t" -w -t nat -X HY2MGR_HOP 2>/dev/null || true
+      done
       rm -f /etc/systemd/system/hysteria-server.service /etc/systemd/system/hy2mgr-node-sync.* \
             /usr/local/bin/hy2mgr-node-sync "$HY_BIN" /etc/sysctl.d/99-hysteria.conf
       rm -rf "$HY_CONF_DIR" "$HY_DATA_DIR"

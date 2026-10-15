@@ -143,7 +143,9 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
   <div class="f">
     <label>名称</label><input name="name" required>
     <label>连接地址</label><input name="address" required placeholder="域名或 IP">
-    <label>端口</label><input name="port" value="443" placeholder="443 或 20000-30000 (端口跳跃)">
+    <label>端口</label><input name="port" value="443" placeholder="hysteria 监听端口，如 443">
+    <label>端口跳跃</label><input name="hop_ports" placeholder="如 20000-30000，留空关闭" title="节点会用 iptables 把这段 UDP 端口转发到监听端口；云服务器安全组需放行这段端口">
+    <label>跳跃间隔 (秒)</label><input name="hop_interval" type="number" min="5" max="3600" value="30">
     <label>SNI</label><input name="sni" placeholder="可选">
     <label>跳过证书验证</label><select name="insecure"><option value="0">否</option><option value="1">是 (自签证书)</option></select>
     <label>混淆密码</label><input name="obfs_password" placeholder="salamander，留空关闭">
@@ -333,7 +335,7 @@ async function loadNodes() {
   nodes = (await api("GET", "/nodes")).items;
   $("#nBody").innerHTML = nodes.map((n, i) => `<tr>
     <td><b>${esc(n.name)}</b></td>
-    <td class="num">${esc(n.address)}:${esc(n.port)}${n.obfs_password ? ' <span class="muted">obfs</span>' : ""}</td>
+    <td class="num">${esc(n.address)}:${esc(n.port)}${n.obfs_password ? ' <span class="muted">obfs</span>' : ""}${n.hop_ports ? `<div class="muted">端口跳跃 ${esc(n.hop_ports)}</div>` : ""}</td>
     <td class="num">${n.online}</td>
     <td>${rel(n.last_sync_at)}${n.last_error ? `<div class="muted" style="color:var(--err)">${esc(n.last_error)}</div>` : ""}</td>
     <td>${agentStatus(n)}</td>
@@ -374,7 +376,7 @@ function openNode(n) {
   editingNode = n ? n.id : null;
   const f = $("#nodeForm"); f.reset(); $("#nodeDlg").returnValue = "";
   $("#nodeDlgTitle").textContent = n ? "编辑节点" : "新建节点";
-  if (n) for (const k of ["name", "address", "port", "sni", "obfs_password", "api_url", "api_secret", "sort"]) f[k].value = n[k];
+  if (n) for (const k of ["name", "address", "port", "sni", "obfs_password", "hop_ports", "hop_interval", "api_url", "api_secret", "sort"]) f[k].value = n[k];
   if (n) { f.insecure.value = n.insecure ? "1" : "0"; f.enabled.value = n.enabled ? "1" : "0"; }
   $("#nodeDlg").showModal();
 }
@@ -382,11 +384,12 @@ $("#nAdd").onclick = () => openNode(null);
 $("#nodeDlg").onclose = async () => {
   if ($("#nodeDlg").returnValue !== "ok") return;
   const f = $("#nodeForm"); const body = {};
-  for (const k of ["name", "address", "port", "sni", "obfs_password", "api_url", "api_secret"]) body[k] = f[k].value.trim();
+  for (const k of ["name", "address", "port", "sni", "obfs_password", "hop_ports", "api_url", "api_secret"]) body[k] = f[k].value.trim();
+  body.hop_interval = Number(f.hop_interval.value || 30);
   body.sort = Number(f.sort.value || 0); body.insecure = f.insecure.value === "1"; body.enabled = f.enabled.value === "1";
   try {
     if (editingNode) await api("PATCH", "/nodes/" + editingNode, body); else await api("POST", "/nodes", body);
-    toast(editingNode ? "已保存，节点将在 1 分钟内应用端口/混淆修改" : "已保存"); loadNodes();
+    toast(editingNode ? "已保存，节点将在 1 分钟内应用端口/混淆/端口跳跃修改" : "已保存"); loadNodes();
   } catch (e) { $("#nodeDlg").showModal(); }
 };
 

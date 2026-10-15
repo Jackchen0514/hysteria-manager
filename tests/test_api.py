@@ -237,6 +237,36 @@ class APITest(unittest.TestCase):
         self.call("POST", "/api/v1/users/lee/regenerate", {})
         self.assertEqual(self.call("GET", sub, token=None)[0], 404)
 
+    def test_port_hopping(self):
+        for bad in ("abc", "30000-20000", "0-10", "20000-70000", "1-2-3"):
+            self.assertEqual(self.call("POST", "/api/v1/nodes", {"name": "x", "address": "y", "hop_ports": bad})[0],
+                             400, bad)
+        self.assertEqual(self.call("POST", "/api/v1/nodes", {"name": "x", "address": "y", "hop_interval": 1})[0], 400)
+        n = self.add_node(name="JP", address="jp.example.com", port="443", hop_ports="20000:30000, 40000-40100",
+                          hop_interval=20)
+        self.assertEqual((n["hop_ports"], n["hop_interval"]), ("20000-30000,40000-40100", 20))
+        _, u, _ = self.call("POST", "/api/v1/users", {"username": "hop", "password": "hoppass1"})
+        _, data, _ = self.call("GET", u["subscription_url"], token=None, raw=True)
+        self.assertEqual(base64.b64decode(data).decode(),
+                         "hysteria2://hoppass1@jp.example.com:443/?mport=20000-30000%2C40000-40100#JP")
+        _, clash, _ = self.call("GET", u["subscription_url"] + "?format=clash", token=None, raw=True)
+        clash = clash.decode()
+        self.assertIn("port: 443\n", clash)
+        self.assertIn('ports: "20000-30000/40000-40100"', clash)
+        self.assertIn("hop-interval: 20", clash)
+        # agent sync status includes hop ports
+        url = "/hy2/node/%s/config" % n["auth_token"]
+        _, r, _ = self.call("GET", url + "?port=443&obfs=&hop=", token=None)
+        self.assertEqual(r["hop_ports"], "20000-30000,40000-40100")
+        self.assertFalse(self.call("GET", "/api/v1/nodes/%d" % n["id"])[1]["agent_synced"])
+        self.call("GET", url + "?port=443&obfs=&hop=20000-30000,40000-40100", token=None)
+        self.assertTrue(self.call("GET", "/api/v1/nodes/%d" % n["id"])[1]["agent_synced"])
+        # turning hopping off
+        _, n, _ = self.call("PATCH", "/api/v1/nodes/%d" % n["id"], {"hop_ports": ""})
+        self.assertEqual(n["hop_ports"], "")
+        _, data, _ = self.call("GET", u["subscription_url"], token=None, raw=True)
+        self.assertNotIn("mport", base64.b64decode(data).decode())
+
     def test_node_config(self):
         n = self.add_node(obfs_password="ob")
         _, r, _ = self.call("GET", "/api/v1/nodes/%d/config" % n["id"])
@@ -250,7 +280,7 @@ class APITest(unittest.TestCase):
         self.assertFalse(n["agent_synced"])
         url = "/hy2/node/%s/config" % n["auth_token"]
         s, r, _ = self.call("GET", url + "?port=443&obfs=", token=None)
-        self.assertEqual(r, {"listen_port": 8443, "port": "8443", "obfs_password": "ob"})
+        self.assertEqual(r, {"listen_port": 8443, "port": "8443", "obfs_password": "ob", "hop_ports": ""})
         _, n, _ = self.call("GET", "/api/v1/nodes/%d" % n["id"])
         self.assertEqual((n["agent_port"], n["agent_synced"]), ("443", False))
         self.assertNotIn("agent_obfs", n)

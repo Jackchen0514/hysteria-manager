@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS nodes (
     sni          TEXT NOT NULL DEFAULT '',
     insecure     INTEGER NOT NULL DEFAULT 0,
     obfs_password TEXT NOT NULL DEFAULT '',     -- salamander obfs, empty = off
+    hop_ports    TEXT NOT NULL DEFAULT '',      -- port hopping range(s) redirected to port, e.g. 20000-30000
+    hop_interval INTEGER NOT NULL DEFAULT 30,   -- client hop interval in seconds
     api_url      TEXT NOT NULL DEFAULT '',      -- hysteria trafficStats url, e.g. http://1.2.3.4:9999
     api_secret   TEXT NOT NULL DEFAULT '',
     auth_token   TEXT NOT NULL UNIQUE,          -- identifies the node when it calls our auth endpoint
@@ -43,6 +45,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     agent_seen_at INTEGER NOT NULL DEFAULT 0,      -- last config pull by the node sync agent
     agent_port   TEXT NOT NULL DEFAULT '',          -- listen port the agent reported as applied
     agent_obfs   TEXT NOT NULL DEFAULT '',          -- obfs password the agent reported as applied
+    agent_hop    TEXT NOT NULL DEFAULT '',          -- hop ports the agent reported as applied
     created_at   INTEGER NOT NULL
 );
 
@@ -68,7 +71,7 @@ USER_FIELDS = (
 )
 NODE_FIELDS = (
     "name", "address", "port", "sni", "insecure", "obfs_password",
-    "api_url", "api_secret", "enabled", "sort",
+    "hop_ports", "hop_interval", "api_url", "api_secret", "enabled", "sort",
 )
 
 
@@ -98,6 +101,9 @@ class DB:
         for table, name, ddl in (("nodes", "agent_seen_at", "INTEGER NOT NULL DEFAULT 0"),
                                  ("nodes", "agent_port", "TEXT NOT NULL DEFAULT ''"),
                                  ("nodes", "agent_obfs", "TEXT NOT NULL DEFAULT ''"),
+                                 ("nodes", "hop_ports", "TEXT NOT NULL DEFAULT ''"),
+                                 ("nodes", "hop_interval", "INTEGER NOT NULL DEFAULT 30"),
+                                 ("nodes", "agent_hop", "TEXT NOT NULL DEFAULT ''"),
                                  ("users", "traffic_multiplier", "REAL NOT NULL DEFAULT 1.0")):
             cols = {r[1] for r in self.conn.execute("PRAGMA table_info(%s)" % table)}
             if name not in cols:
@@ -225,7 +231,7 @@ class DB:
     def update_node(self, node_id, data):
         sets = {k: v for k, v in data.items()
                 if k in NODE_FIELDS + ("last_sync_at", "last_error", "online", "auth_token",
-                                      "agent_seen_at", "agent_port", "agent_obfs")}
+                                      "agent_seen_at", "agent_port", "agent_obfs", "agent_hop")}
         if sets:
             self.x("UPDATE nodes SET %s WHERE id=?" % ",".join(k + "=?" for k in sets),
                    tuple(sets.values()) + (node_id,))
