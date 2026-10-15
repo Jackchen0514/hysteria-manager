@@ -9,11 +9,13 @@ import ssl
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from . import REPO_URL, __version__, commit
 from .db import gen_token, now
 from .service import GB, Service
 
 log = logging.getLogger("hy2mgr")
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+COMMIT = commit()
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,64}$")
 
 
@@ -123,6 +125,11 @@ def api_login(h, svc, m, body):
     if not res:
         raise APIError(401, "invalid credentials")
     return {"token": res[0], "expire_at": res[1]}
+
+
+@route("GET", "/api/v1/version")
+def api_version(h, svc, m, body):
+    return {"version": __version__, "commit": COMMIT, "repo": REPO_URL}
 
 
 @route("GET", "/api/v1/stats")

@@ -14,6 +14,9 @@ header h1{font-size:16px;margin:0;white-space:nowrap}
 nav{display:flex;gap:4px;flex:1}
 nav a{padding:6px 12px;border-radius:6px;color:var(--muted);text-decoration:none;cursor:pointer}
 nav a.on{background:var(--bg);color:var(--text);font-weight:600}
+#ver{color:var(--muted);font-size:12px;white-space:nowrap;text-decoration:none;font-variant-numeric:tabular-nums}
+a#ver:hover{color:var(--pri)}
+#verFoot{display:none;text-align:center;color:var(--muted);font-size:12px;padding:8px 0 20px}
 main{max-width:1200px;margin:0 auto;padding:20px 16px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}
@@ -51,7 +54,7 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
 #toast.on{opacity:1}
 .hide{display:none!important}
 .pager{display:flex;gap:8px;justify-content:flex-end;align-items:center;margin-top:12px}
-@media (max-width:640px){header{gap:10px;padding:0 12px}header h1{display:none}.f{grid-template-columns:1fr}.f label{margin-bottom:-6px}}
+@media (max-width:640px){header{gap:10px;padding:0 12px}header h1,#ver{display:none}#verFoot{display:block}.f{grid-template-columns:1fr}.f label{margin-bottom:-6px}}
 </style>
 </head>
 <body>
@@ -70,6 +73,7 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
   <nav>
     <a data-p="dash">概览</a><a data-p="users">用户</a><a data-p="nodes">节点</a><a data-p="api">API</a>
   </nav>
+  <a id="ver" target="_blank" rel="noopener"></a>
   <button class="sm" id="logout">退出</button>
 </header>
 <main>
@@ -113,6 +117,7 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
     </div>
   </section>
 </main>
+<div id="verFoot"></div>
 </div>
 
 <dialog id="userDlg"><form method="dialog" id="userForm">
@@ -397,8 +402,18 @@ curl -X POST ${location.origin}/api/v1/users/alice/extend -H "Authorization: Bea
 curl -X POST ${location.origin}/api/v1/users/alice/reset-traffic -H "Authorization: Bearer $TOKEN"`;
 }
 
+async function loadVersion() {
+  try {
+    const v = await api("GET", "/version");
+    const el = $("#ver"), short = (v.commit || "").slice(0, 7);
+    el.textContent = $("#verFoot").textContent = "v" + v.version + (short ? " · " + short : "");
+    el.title = v.commit ? "当前版本 " + v.commit : "当前版本";
+    if (/^[0-9a-f]{40}$/.test(v.commit)) el.href = v.repo + "/commit/" + v.commit; else el.removeAttribute("href");
+  } catch (e) {}
+}
 async function start() {
   $("#login").classList.add("hide"); $("#app").classList.remove("hide");
+  loadVersion();
   let p = "dash"; try { p = localStorage.getItem("hy2m_page") || "dash"; } catch (e) {}
   go(p);
 }

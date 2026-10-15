@@ -110,6 +110,13 @@ class APITest(unittest.TestCase):
         self.assertEqual(self.call("GET", "/api/v1/users", token=r["token"])[0], 200)
         self.assertEqual(self.call("POST", "/api/v1/login", {"username": "admin", "password": "x"}, token=None)[0], 401)
 
+    def test_version(self):
+        from hy2mgr import __version__
+        self.assertEqual(self.call("GET", "/api/v1/version", token=None)[0], 401)
+        s, r, _ = self.call("GET", "/api/v1/version")
+        self.assertEqual((s, r["version"]), (200, __version__))
+        self.assertIn("commit", r)
+
     def test_user_crud_and_validation(self):
         s, u, _ = self.call("POST", "/api/v1/users", {"username": "bob", "traffic_limit_gb": 10, "expire_days": 30})
         self.assertEqual(s, 201)
