@@ -143,9 +143,12 @@ class Service:
                 up, down = int(st.get("tx", 0)), int(st.get("rx", 0))
                 if not up and not down:
                     continue
-                u = self.db.q1("SELECT id FROM users WHERE username=?", (name,))
+                u = self.db.q1("SELECT id, traffic_multiplier FROM users WHERE username=?", (name,))
                 if not u:
                     continue
+                # Quota and history use counted traffic (actual * per-user multiplier).
+                m = u["traffic_multiplier"]
+                up, down = int(round(up * m)), int(round(down * m))
                 self.db.x("UPDATE users SET upload=upload+?, download=download+? WHERE id=?",
                           (up, down, u["id"]))
                 self.db.x("INSERT INTO traffic_logs(user_id,node_id,upload,download,ts) "

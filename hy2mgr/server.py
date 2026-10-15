@@ -85,6 +85,11 @@ def parse_user_input(body, creating):
         out["expire_at"] = 0 if d <= 0 else now() + int(d * 86400)
     if "reset_day" in body:
         out["reset_day"] = _int(body["reset_day"], "reset_day", 0, 28)
+    if "traffic_multiplier" in body:
+        v = _num(body["traffic_multiplier"], "traffic_multiplier")
+        if not 0 <= v <= 100:
+            raise APIError(400, "traffic_multiplier must be between 0 and 100")
+        out["traffic_multiplier"] = round(v, 4)
     if "upload" in body:
         out["upload"] = _int(body["upload"], "upload", 0)
     if "download" in body:

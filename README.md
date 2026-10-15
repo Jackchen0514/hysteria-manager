@@ -192,6 +192,7 @@ token 为 `HY2M_API_TOKEN`，或调用 login 获得的会话 token。请求和�
   "used": 20006722,
   "remaining": 107354175678,       // 不限流量时为 null
   "reset_day": 1,                  // 每月几号自动重置流量 (1-28)，0 = 不自动重置
+  "traffic_multiplier": 1.0,       // 流量倍数：计入的流量 = 实际流量 × 倍数
   "last_reset_at": 1792046514,
   "status": "active",              // active | disabled | expired | overlimit
   "note": "",
@@ -236,6 +237,7 @@ token 为 `HY2M_API_TOKEN`，或调用 login 获得的会话 token。请求和�
 | `expire_at` | int | 到期时间（unix 秒），0 = 永不过期 |
 | `expire_days` | number | 从现在起 N 天后到期（二选一），0 = 永不过期 |
 | `reset_day` | int | 每月自动重置流量日，0-28 |
+| `traffic_multiplier` | number | 流量倍数，默认 1.0，范围 0-100。计入的流量 = 实际流量 × 倍数（如 2 表示用 1GB 记 2GB，0 表示不计流量）；只影响之后同步的流量，已用流量不重新计算 |
 | `enabled` | bool | 是否启用 |
 | `upload` / `download` | int | 直接设置已用流量（字节） |
 | `note` | string | 备注 |
@@ -268,6 +270,9 @@ curl -X POST $P/users/alice/add-traffic -H "Authorization: Bearer $TOKEN" -d '{"
 
 # 重置已用流量
 curl -X POST $P/users/alice/reset-traffic -H "Authorization: Bearer $TOKEN"
+
+# 设置流量倍数为 1.5
+curl -X PATCH $P/users/alice -H "Authorization: Bearer $TOKEN" -d '{"traffic_multiplier":1.5}'
 
 # 禁用
 curl -X PATCH $P/users/alice -H "Authorization: Bearer $TOKEN" -d '{"enabled":false}'

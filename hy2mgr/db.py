@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS users (
     upload        INTEGER NOT NULL DEFAULT 0,    -- bytes, client -> server
     download      INTEGER NOT NULL DEFAULT 0,    -- bytes, server -> client
     reset_day     INTEGER NOT NULL DEFAULT 0,    -- 1..28: auto reset traffic monthly on this day, 0 = off
+    traffic_multiplier REAL NOT NULL DEFAULT 1.0, -- counted traffic = actual traffic * multiplier
     last_reset_at INTEGER NOT NULL DEFAULT 0,
     note          TEXT NOT NULL DEFAULT '',
     created_at    INTEGER NOT NULL,
@@ -63,7 +64,7 @@ CREATE INDEX IF NOT EXISTS idx_traffic_logs_user_ts ON traffic_logs(user_id, ts)
 
 USER_FIELDS = (
     "username", "password", "enabled", "expire_at", "traffic_limit",
-    "upload", "download", "reset_day", "note",
+    "upload", "download", "reset_day", "traffic_multiplier", "note",
 )
 NODE_FIELDS = (
     "name", "address", "port", "sni", "insecure", "obfs_password",
@@ -94,12 +95,13 @@ class DB:
 
     def _migrate(self):
         """Add columns introduced after a database was created."""
-        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(nodes)")}
-        for name, ddl in (("agent_seen_at", "INTEGER NOT NULL DEFAULT 0"),
-                          ("agent_port", "TEXT NOT NULL DEFAULT ''"),
-                          ("agent_obfs", "TEXT NOT NULL DEFAULT ''")):
+        for table, name, ddl in (("nodes", "agent_seen_at", "INTEGER NOT NULL DEFAULT 0"),
+                                 ("nodes", "agent_port", "TEXT NOT NULL DEFAULT ''"),
+                                 ("nodes", "agent_obfs", "TEXT NOT NULL DEFAULT ''"),
+                                 ("users", "traffic_multiplier", "REAL NOT NULL DEFAULT 1.0")):
+            cols = {r[1] for r in self.conn.execute("PRAGMA table_info(%s)" % table)}
             if name not in cols:
-                self.conn.execute("ALTER TABLE nodes ADD COLUMN %s %s" % (name, ddl))
+                self.conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, name, ddl))
 
     # ---- low level -------------------------------------------------------
     def q(self, sql, args=()):
@@ -172,6 +174,7 @@ class DB:
             "upload": 0,
             "download": 0,
             "reset_day": int(data.get("reset_day", 0)),
+            "traffic_multiplier": float(data.get("traffic_multiplier", 1.0)),
             "last_reset_at": t,
             "note": data.get("note", ""),
             "created_at": t,

@@ -183,6 +183,26 @@ class APITest(unittest.TestCase):
         _, eve, _ = self.call("POST", "/api/v1/users/eve/add-traffic", {"bytes": 1000})
         self.assertEqual(eve["status"], "active")
 
+    def test_traffic_multiplier(self):
+        self.add_node()
+        _, u, _ = self.call("POST", "/api/v1/users", {"username": "x2", "traffic_multiplier": 2})
+        self.assertEqual(u["traffic_multiplier"], 2.0)
+        _, u, _ = self.call("POST", "/api/v1/users", {"username": "def"})
+        self.assertEqual(u["traffic_multiplier"], 1.0)
+        self.call("POST", "/api/v1/users", {"username": "free", "traffic_multiplier": 0})
+        self.call("POST", "/api/v1/users", {"username": "half"})
+        _, u, _ = self.call("PATCH", "/api/v1/users/half", {"traffic_multiplier": 0.5})
+        self.assertEqual(u["traffic_multiplier"], 0.5)
+        for bad in (-1, 101, "abc"):
+            self.assertEqual(self.call("PATCH", "/api/v1/users/half", {"traffic_multiplier": bad})[0], 400)
+        self.fake.traffic = {n: {"tx": 100, "rx": 1001} for n in ("x2", "def", "free", "half")}
+        self.call("POST", "/api/v1/sync")
+        got = {n: (u["upload"], u["download"]) for n in ("x2", "def", "free", "half")
+               for u in [self.call("GET", "/api/v1/users/" + n)[1]]}
+        self.assertEqual(got, {"x2": (200, 2002), "def": (100, 1001), "free": (0, 0), "half": (50, 500)})
+        _, hist, _ = self.call("GET", "/api/v1/users/x2/traffic")
+        self.assertEqual(hist["items"][0]["download"], 2002)
+
     def test_sync_error_recorded(self):
         self.add_node(api_secret="wrong")
         _, r, _ = self.call("POST", "/api/v1/sync")
@@ -250,8 +270,17 @@ class APITest(unittest.TestCase):
         c.execute("INSERT INTO nodes(name,address,auth_token,created_at) VALUES('a','b','t',0)")
         c.commit()
         c.close()
-        n = DB(path).get_node(1)
+        c = sqlite3.connect(path)
+        c.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE, "
+                  "password TEXT NOT NULL, sub_token TEXT NOT NULL, created_at INTEGER NOT NULL, "
+                  "updated_at INTEGER NOT NULL)")
+        c.execute("INSERT INTO users(username,password,sub_token,created_at,updated_at) VALUES('u','p','s',0,0)")
+        c.commit()
+        c.close()
+        db = DB(path)
+        n = db.get_node(1)
         self.assertEqual((n["agent_seen_at"], n["agent_port"], n["agent_obfs"]), (0, "", ""))
+        self.assertEqual(db.get_user("u")["traffic_multiplier"], 1.0)
 
     def test_auto_reset(self):
         self.call("POST", "/api/v1/users", {"username": "mo", "reset_day": 5})

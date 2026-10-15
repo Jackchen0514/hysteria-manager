@@ -130,6 +130,7 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
     <label>快速设置</label><div class="acts">
       <button type="button" class="sm" data-days="0">永不过期</button><button type="button" class="sm" data-days="7">7 天后</button>
       <button type="button" class="sm" data-days="30">30 天后</button><button type="button" class="sm" data-days="90">90 天后</button><button type="button" class="sm" data-days="365">1 年后</button></div>
+    <label>流量倍数</label><input name="traffic_multiplier" type="number" min="0" max="100" step="0.1" value="1" title="计入的流量 = 实际流量 × 倍数，0 = 不计流量">
     <label>每月重置日</label><input name="reset_day" type="number" min="0" max="28" placeholder="0 = 不自动重置">
     <label>启用</label><select name="enabled"><option value="1">是</option><option value="0">否</option></select>
     <label>备注</label><input name="note">
@@ -236,7 +237,7 @@ async function loadUsers() {
       <td><b>${esc(u.username)}</b></td>
       <td><span class="tag s-${u.status}">${STATUS[u.status]}</span></td>
       <td class="num">${fmtBytes(u.used)} / ${u.traffic_limit ? fmtBytes(u.traffic_limit) : "不限"}
-        <div class="muted">↑${fmtBytes(u.upload)} ↓${fmtBytes(u.download)}</div>
+        <div class="muted">↑${fmtBytes(u.upload)} ↓${fmtBytes(u.download)}${u.traffic_multiplier !== 1 ? ` · <b title="计入的流量 = 实际流量 × ${u.traffic_multiplier}">×${u.traffic_multiplier}</b>` : ""}</div>
         ${u.traffic_limit ? `<div class="prog"><i style="width:${pct}%"></i></div>` : ""}</td>
       <td class="num">${fmtTime(u.expire_at)}<div class="muted">${daysLeft(u.expire_at)}</div></td>
       <td>${u.reset_day ? "每月 " + u.reset_day + " 日" : "-"}</td>
@@ -305,6 +306,7 @@ function openUser(u) {
     f.username.value = u.username; f.password.value = u.password;
     f.traffic_limit_gb.value = u.traffic_limit ? +(u.traffic_limit / GB).toFixed(3) : "";
     f.expire_at.value = toLocalInput(u.expire_at); f.reset_day.value = u.reset_day || "";
+    f.traffic_multiplier.value = u.traffic_multiplier;
     f.enabled.value = u.enabled ? "1" : "0"; f.note.value = u.note;
   }
   $("#userDlg").showModal();
@@ -315,7 +317,8 @@ $("#userDlg").onclose = async () => {
   const f = $("#userForm");
   const body = {username: f.username.value.trim(), traffic_limit_gb: Number(f.traffic_limit_gb.value || 0),
     expire_at: f.expire_at.value ? Math.floor(new Date(f.expire_at.value).getTime() / 1000) : 0,
-    reset_day: Number(f.reset_day.value || 0), enabled: f.enabled.value === "1", note: f.note.value};
+    reset_day: Number(f.reset_day.value || 0), enabled: f.enabled.value === "1", note: f.note.value,
+    traffic_multiplier: f.traffic_multiplier.value === "" ? 1 : Number(f.traffic_multiplier.value)};
   if (f.password.value) body.password = f.password.value;
   try {
     if (editing) await api("PATCH", "/users/" + encodeURIComponent(editing), body);
