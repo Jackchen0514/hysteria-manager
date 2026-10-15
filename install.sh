@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Hysteria2 Manager installer — Cloudflare DNS-01 (Let's Encrypt) certificates.
 #
+# One-liner (downloads the panel code automatically when needed):
+#   bash <(curl -fsSL https://raw.githubusercontent.com/Jackchen0514/hysteria-manager/main/install.sh) all ...
+#
 #   bash install.sh panel  --domain panel.example.com --cf-token TOKEN --email you@mail.com
 #   bash install.sh node   --domain hk.example.com    --cf-token TOKEN --email you@mail.com \
 #                          --panel https://panel.example.com --api-token API_TOKEN [--name 香港]
@@ -13,7 +16,8 @@
 # (My Profile -> API Tokens -> Create Token -> "Edit zone DNS" template, then add Zone:Read).
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]:-$0}")"   # /dev/fd when run via bash <(curl ...)
+SCRIPT_DIR="$(cd "$SCRIPT_DIR" 2>/dev/null && pwd)" || SCRIPT_DIR="$PWD"
 PANEL_DIR=/opt/hy2mgr
 PANEL_USER=hy2mgr
 HY_BIN=/usr/local/bin/hysteria
@@ -22,6 +26,7 @@ HY_DATA_DIR=/var/lib/hysteria
 HY_USER=hysteria
 ACME_HOME="${HOME:-/root}/.acme.sh"
 CF_API="${CF_API:-https://api.cloudflare.com/client/v4}"
+REPO_TARBALL="${HY2M_TARBALL:-https://github.com/Jackchen0514/hysteria-manager/archive/refs/heads/main.tar.gz}"
 
 # ---- options ---------------------------------------------------------------
 MODE="${1:-}"; [ $# -gt 0 ] && shift
@@ -32,7 +37,15 @@ PANEL_PORT=443; NODE_PORT=443; ADMIN_USER="admin"; ADMIN_PASS=""
 PANEL_URL=""; API_TOKEN=""; NODE_NAME=""; OBFS=0; STATS_PORT=9999
 HY_VERSION=latest; DNS_RECORD=1
 
-usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; cat <<'EOF'
+usage() { cat <<'EOF'
+Usage:
+  install.sh panel  --domain panel.example.com --cf-token TOKEN --email you@mail.com
+  install.sh node   --domain hk.example.com --cf-token TOKEN --email you@mail.com \
+                    --panel https://panel.example.com --api-token API_TOKEN [--name 香港]
+  install.sh all    --domain panel.example.com --node-domain hk.example.com --cf-token TOKEN --email you@mail.com
+  install.sh uninstall panel|node
+
+Cloudflare API token permissions: Zone -> Zone -> Read, Zone -> DNS -> Edit
 
 Options:
   --domain D          panel: panel domain;  node: node domain
@@ -187,8 +200,14 @@ install_panel() {
   ask DOMAIN "Panel domain (e.g. panel.example.com)"
   valid_domain "$DOMAIN" || die "invalid domain: $DOMAIN"
   ask EMAIL "ACME email"
-  [ -f "$SCRIPT_DIR/hy2mgr/__main__.py" ] || die "run this script from the hy2mgr project directory"
-  install_pkgs curl python3 openssl
+  install_pkgs curl python3 openssl tar
+  local src="$SCRIPT_DIR"
+  if [ ! -f "$src/hy2mgr/__main__.py" ]; then   # e.g. run via bash <(curl ...)
+    info "downloading panel code"
+    src="$(mktemp -d)"
+    curl -fsSL "$REPO_TARBALL" | tar -xz -C "$src" --strip-components=1 || die "download failed: $REPO_TARBALL"
+    [ -f "$src/hy2mgr/__main__.py" ] || die "downloaded archive does not contain hy2mgr/"
+  fi
   if ! command -v crontab >/dev/null; then   # acme.sh needs cron for auto-renewal
     if command -v apt-get >/dev/null; then install_pkgs cron; else install_pkgs cronie; fi
     systemctl enable --now cron 2>/dev/null || systemctl enable --now crond 2>/dev/null || true
@@ -211,7 +230,7 @@ install_panel() {
   id "$PANEL_USER" >/dev/null 2>&1 || useradd --system --home-dir "$PANEL_DIR" --shell /usr/sbin/nologin "$PANEL_USER"
   mkdir -p "$PANEL_DIR/data" "$PANEL_DIR/certs"
   rm -rf "$PANEL_DIR/hy2mgr"
-  cp -r "$SCRIPT_DIR/hy2mgr" "$PANEL_DIR/"
+  cp -r "$src/hy2mgr" "$PANEL_DIR/"
   find "$PANEL_DIR/hy2mgr" -name __pycache__ -prune -exec rm -rf {} +
 
   "$ACME_HOME/acme.sh" --install-cert -d "$DOMAIN" --ecc \
@@ -514,7 +533,7 @@ uninstall() {
       rm -f /etc/systemd/system/hysteria-server.service "$HY_BIN" /etc/sysctl.d/99-hysteria.conf
       rm -rf "$HY_CONF_DIR" "$HY_DATA_DIR"
       info "hysteria removed. Delete the node in the panel as well.";;
-    *) die "usage: $0 uninstall panel|node";;
+    *) die "usage: install.sh uninstall panel|node";;
   esac
   systemctl daemon-reload
 }

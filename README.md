@@ -45,15 +45,29 @@ HY2M_ADMIN_PASS=your-pass HY2M_PUBLIC_URL=http://你的面板IP:8080 python3 -m 
 
 需要一个 Cloudflare API Token：Cloudflare 后台 → My Profile → API Tokens → Create Token，权限 **Zone · Zone · Read** + **Zone · DNS · Edit**。脚本会自动把域名的 A 记录指向本机（**仅 DNS，不开小黄云**，因为 Hysteria2 走 UDP，无法经过 CF 代理）。
 
+可以直接在线执行（面板代码会自动下载），也可以 clone 仓库后执行 `bash install.sh ...`，参数相同：
+
 ```bash
 # 面板 + 节点装在同一台机器（最简单）
+bash <(curl -fsSL https://raw.githubusercontent.com/Jackchen0514/hysteria-manager/main/install.sh) all \
+     --domain panel.example.com --node-domain hk.example.com --cf-token <CF_TOKEN> --email you@mail.com
+
+# 在其他服务器上加节点，自动注册到面板
+bash <(curl -fsSL https://raw.githubusercontent.com/Jackchen0514/hysteria-manager/main/install.sh) node \
+     --domain jp.example.com --cf-token <CF_TOKEN> --email you@mail.com \
+     --panel https://panel.example.com --api-token <面板 API Token> --name 日本 [--obfs]
+```
+
+在仓库目录内执行：
+
+```bash
 bash install.sh all --domain panel.example.com --node-domain hk.example.com \
      --cf-token <CF_TOKEN> --email you@mail.com
 
-# 只装面板（需要在项目目录下执行）
+# 只装面板
 bash install.sh panel --domain panel.example.com --cf-token <CF_TOKEN> --email you@mail.com
 
-# 在其他服务器上加节点（只需要 install.sh 这一个文件），自动注册到面板
+# 加节点
 bash install.sh node --domain jp.example.com --cf-token <CF_TOKEN> --email you@mail.com \
      --panel https://panel.example.com --api-token <面板 API Token> --name 日本 [--obfs]
 
