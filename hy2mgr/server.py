@@ -10,7 +10,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .db import gen_token, now
-from .service import GB
+from .service import GB, Service
 
 log = logging.getLogger("hy2mgr")
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
@@ -265,6 +265,11 @@ def present_node(n):
     n = dict(n)
     for k in ("insecure", "enabled"):
         n[k] = bool(n[k])
+    # Whether the node sync agent has applied the current port / obfs settings.
+    listen_port = str(Service._split_port(n["port"])[0])
+    n["agent_synced"] = bool(n["agent_seen_at"]) and n["agent_port"] == listen_port \
+        and n["agent_obfs"] == n["obfs_password"]
+    n.pop("agent_obfs")
     return n
 
 
@@ -315,6 +320,19 @@ def api_node_config(h, svc, m, body):
     manager = svc.cfg.public_url or h.base_url()
     return {"yaml": svc.node_server_config(n, manager),
             "auth_url": "%s/hy2/auth/%s" % (manager, n["auth_token"])}
+
+
+# ---- node sync agent ----
+@route("GET", "/hy2/node/{token}/config", auth=False)
+def hy2_node_config(h, svc, m, body):
+    """Polled by hy2mgr-node-sync on each node. Query: port / obfs = what is applied now."""
+    n = svc.db.get_node_by_token(m["token"])
+    if not n:
+        raise APIError(404, "not found")
+    svc.db.update_node(n["id"], {"agent_seen_at": now(), "agent_port": h.query.get("port", ""),
+                                 "agent_obfs": h.query.get("obfs", "")})
+    return {"listen_port": Service._split_port(n["port"])[0], "port": n["port"],
+            "obfs_password": n["obfs_password"]}
 
 
 # ---- hysteria2 auth callback ----

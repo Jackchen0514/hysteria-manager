@@ -129,6 +129,17 @@ trafficStats:
 
 3. 节点的 `9999` 端口只需对面板开放（防火墙限制来源 IP）。节点也必须能访问面板的回调地址。
 
+### 在面板修改端口 / 混淆
+
+用 `install.sh` 安装的节点带有同步程序 `hy2mgr-node-sync`（systemd timer，每分钟一次）：从面板拉取该节点的端口和混淆密码，与 `/etc/hysteria/config.yaml` 不一致时自动改写并重启 hysteria。
+
+- 节点列表的「配置下发」一列显示状态：**已应用** / **待应用** / **未安装同步**（手动部署的节点需自己改 `config.yaml`）
+- 新配置启动失败会自动回滚到旧配置，并且不会每分钟反复重试，直到面板里的设置再次修改
+- 本机 ufw / firewalld 会自动放行新端口，**云服务器安全组需要自己放行**
+- 填写端口范围（如 `20000-30000`）时 hysteria 只监听第一个端口，端口跳跃所需的 iptables 转发规则需自行配置
+- 手动触发：`systemctl start hy2mgr-node-sync`，查看日志：`journalctl -u hy2mgr-node-sync`
+- 重新执行 `install.sh` 会保留面板里设置的端口和混淆，除非显式传入 `--port` / `--obfs` / `--no-obfs`
+
 ## 订阅
 
 每个用户有独立的订阅地址 `/sub/<token>`：

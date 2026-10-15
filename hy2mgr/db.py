@@ -39,6 +39,9 @@ CREATE TABLE IF NOT EXISTS nodes (
     last_sync_at INTEGER NOT NULL DEFAULT 0,
     last_error   TEXT NOT NULL DEFAULT '',
     online       INTEGER NOT NULL DEFAULT 0,
+    agent_seen_at INTEGER NOT NULL DEFAULT 0,      -- last config pull by the node sync agent
+    agent_port   TEXT NOT NULL DEFAULT '',          -- listen port the agent reported as applied
+    agent_obfs   TEXT NOT NULL DEFAULT '',          -- obfs password the agent reported as applied
     created_at   INTEGER NOT NULL
 );
 
@@ -87,6 +90,16 @@ class DB:
         self.lock = threading.RLock()
         with self.lock:
             self.conn.executescript(SCHEMA)
+            self._migrate()
+
+    def _migrate(self):
+        """Add columns introduced after a database was created."""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(nodes)")}
+        for name, ddl in (("agent_seen_at", "INTEGER NOT NULL DEFAULT 0"),
+                          ("agent_port", "TEXT NOT NULL DEFAULT ''"),
+                          ("agent_obfs", "TEXT NOT NULL DEFAULT ''")):
+            if name not in cols:
+                self.conn.execute("ALTER TABLE nodes ADD COLUMN %s %s" % (name, ddl))
 
     # ---- low level -------------------------------------------------------
     def q(self, sql, args=()):
@@ -208,7 +221,8 @@ class DB:
 
     def update_node(self, node_id, data):
         sets = {k: v for k, v in data.items()
-                if k in NODE_FIELDS + ("last_sync_at", "last_error", "online", "auth_token")}
+                if k in NODE_FIELDS + ("last_sync_at", "last_error", "online", "auth_token",
+                                      "agent_seen_at", "agent_port", "agent_obfs")}
         if sets:
             self.x("UPDATE nodes SET %s WHERE id=?" % ",".join(k + "=?" for k in sets),
                    tuple(sets.values()) + (node_id,))

@@ -34,7 +34,7 @@ UNINSTALL_WHAT=""
 if [ "$MODE" = uninstall ]; then UNINSTALL_WHAT="${1:-}"; [ $# -gt 0 ] && shift; fi
 DOMAIN=""; NODE_DOMAIN=""; CF_TOKEN="${CF_TOKEN:-}"; EMAIL=""
 PANEL_PORT=443; NODE_PORT=443; ADMIN_USER="admin"; ADMIN_PASS=""
-PANEL_URL=""; API_TOKEN=""; NODE_NAME=""; OBFS=0; STATS_PORT=9999
+PANEL_URL=""; API_TOKEN=""; NODE_NAME=""; OBFS=""; STATS_PORT=9999; PORT_SET=0
 HY_VERSION=latest; DNS_RECORD=1
 
 usage() { cat <<'EOF'
@@ -53,13 +53,13 @@ Options:
   --cf-token T        Cloudflare API token (or env CF_TOKEN)
   --email E           ACME account email
   --panel-port P      panel HTTPS port (default 443)
-  --port P            hysteria UDP port (default 443)
+  --port P            hysteria UDP port (default 443; on re-install the panel's value is kept)
   --admin-user U      panel admin user (default admin)
   --admin-pass P      panel admin password (default: random, kept on re-install)
   --panel URL         node: panel URL, e.g. https://panel.example.com
   --api-token T       node: panel API token (HY2M_API_TOKEN of the panel)
   --name N            node: display name (default: node domain)
-  --obfs              node: enable salamander obfuscation (random password)
+  --obfs / --no-obfs  node: enable / disable salamander obfuscation (default: keep the panel's setting)
   --stats-port P      node: hysteria traffic stats API port (default 9999)
   --hy-version V      hysteria version, e.g. v2.6.1 (default latest)
   --no-dns            don't create/update the Cloudflare A record
@@ -73,13 +73,14 @@ while [ $# -gt 0 ]; do
     --cf-token) CF_TOKEN="$2"; shift 2;;
     --email) EMAIL="$2"; shift 2;;
     --panel-port) PANEL_PORT="$2"; shift 2;;
-    --port) NODE_PORT="$2"; shift 2;;
+    --port) NODE_PORT="$2"; PORT_SET=1; shift 2;;
     --admin-user) ADMIN_USER="$2"; shift 2;;
     --admin-pass) ADMIN_PASS="$2"; shift 2;;
     --panel) PANEL_URL="${2%/}"; shift 2;;
     --api-token) API_TOKEN="$2"; shift 2;;
     --name) NODE_NAME="$2"; shift 2;;
     --obfs) OBFS=1; shift;;
+    --no-obfs) OBFS=0; shift;;
     --stats-port) STATS_PORT="$2"; shift 2;;
     --hy-version) HY_VERSION="$2"; shift 2;;
     --no-dns) DNS_RECORD=0; shift;;
@@ -362,14 +363,24 @@ install_node() {
   mkdir -p "$HY_CONF_DIR" "$HY_DATA_DIR/acme"
   chown -R "$HY_USER":"$HY_USER" "$HY_DATA_DIR"
 
-  # keep stats secret / obfs password on re-install
-  local conf="$HY_CONF_DIR/config.yaml" secret="" obfs_pw=""
-  if [ -f "$conf" ]; then
-    secret="$(sed -n 's/^  secret: //p' "$conf" | head -1)"
-    obfs_pw="$(sed -n 's/^    password: //p' "$conf" | head -1)"
-  fi
+  # keep stats secret on re-install
+  local conf="$HY_CONF_DIR/config.yaml" secret="" obfs_pw="" port_spec="$NODE_PORT"
+  if [ -f "$conf" ]; then secret="$(sed -n 's/^  secret: //p' "$conf" | head -1)"; fi
   secret="${secret:-$(rand 32)}"
-  if [ "$OBFS" = 1 ]; then obfs_pw="${obfs_pw:-$(rand 24)}"; else obfs_pw=""; fi
+
+  # An already registered node keeps the port / obfs set in the panel unless overridden here.
+  local existing="" cur_port="" cur_obfs=""
+  IFS=$'\t' read -r existing cur_port cur_obfs < <(panel_api GET /nodes | ADDR="$DOMAIN" python3 -c '
+import json, os, sys
+for n in json.load(sys.stdin)["items"]:
+    if n["address"] == os.environ["ADDR"]:
+        print("%s\t%s\t%s" % (n["id"], n["port"], n["obfs_password"])); break') || true
+  if [ -n "$existing" ]; then
+    [ "$PORT_SET" = 1 ] || port_spec="$cur_port"
+    [ "$OBFS" = 0 ] || obfs_pw="$cur_obfs"
+  fi
+  if [ "$OBFS" = 1 ] && [ -z "$obfs_pw" ]; then obfs_pw="$(rand 24)"; fi
+  NODE_PORT="${port_spec%%[-,]*}"   # hysteria listens on the first port of a range / list
 
   # Same machine as the panel -> stats API stays on localhost.
   local stats_listen stats_url local_panel=0
@@ -382,17 +393,12 @@ install_node() {
 
   # register (or update) the node on the panel
   info "registering node on panel"
-  local body existing node_json
-  body="$(NAME="$NODE_NAME" ADDR="$DOMAIN" PORT="$NODE_PORT" OBFS="$obfs_pw" URL="$stats_url" SEC="$secret" python3 -c '
+  local body node_json
+  body="$(NAME="$NODE_NAME" ADDR="$DOMAIN" PORT="$port_spec" OBFS="$obfs_pw" URL="$stats_url" SEC="$secret" python3 -c '
 import json, os
 print(json.dumps({"name": os.environ["NAME"], "address": os.environ["ADDR"], "port": os.environ["PORT"],
                   "sni": os.environ["ADDR"], "insecure": False, "obfs_password": os.environ["OBFS"],
                   "api_url": os.environ["URL"], "api_secret": os.environ["SEC"], "enabled": True}))')"
-  existing="$(panel_api GET /nodes | ADDR="$DOMAIN" python3 -c '
-import json, os, sys
-for n in json.load(sys.stdin)["items"]:
-    if n["address"] == os.environ["ADDR"]:
-        print(n["id"]); break')"
   if [ -n "$existing" ]; then
     node_json="$(panel_api PATCH "/nodes/$existing" "$body")"
   else
@@ -422,7 +428,7 @@ for n in json.load(sys.stdin)["items"]:
       echo "obfs:"
       echo "  type: salamander"
       echo "  salamander:"
-      echo "    password: $obfs_pw"
+      echo "    password: $(V="$obfs_pw" python3 -c 'import json,os; print(json.dumps(os.environ["V"]))')"
       echo
     fi
     echo "auth:"
@@ -473,9 +479,11 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+  install_node_agent
   systemctl daemon-reload
   systemctl enable hysteria-server >/dev/null 2>&1
   systemctl restart hysteria-server
+  systemctl enable --now hy2mgr-node-sync.timer >/dev/null 2>&1
 
   open_port "$NODE_PORT" udp
   if [ $local_panel = 0 ]; then
@@ -509,7 +517,7 @@ EOF
 
   NODE_SUMMARY="
   节点:       $NODE_NAME ($DOMAIN:$NODE_PORT/udp)
-  配置文件:   $conf
+  配置文件:   $conf  (面板修改端口/混淆后由 hy2mgr-node-sync 每分钟自动同步)
   证书:       hysteria 内置 ACME (Cloudflare DNS-01)，自动续期
   统计 API:   $stats_url  (仅需对面板开放)
   日志:       journalctl -u hysteria-server -f"
@@ -517,6 +525,130 @@ EOF
     NODE_SUMMARY="$NODE_SUMMARY
   ${c_ylw}注意: 云服务器安全组需放行 UDP $NODE_PORT，以及来自面板的 TCP $STATS_PORT${c_off}"
   fi
+}
+
+# Agent that pulls port / obfs settings from the panel and applies them to config.yaml.
+install_node_agent() {
+  cat > /usr/local/bin/hy2mgr-node-sync <<'AGENT'
+#!/usr/bin/env python3
+"""Pull this node's port / obfs settings from the hy2mgr panel and apply them to the
+hysteria config. Rolls back if hysteria fails to start with the new config."""
+import json, os, re, shutil, subprocess, sys, time, urllib.parse, urllib.request
+
+CONF = os.environ.get("HY_CONF", "/etc/hysteria/config.yaml")
+SERVICE = "hysteria-server"
+# Settings that failed to start are remembered so we don't restart-loop every minute.
+FAILED = os.environ.get("HY_SYNC_FAILED", "/run/hy2mgr-node-sync.failed")
+OBFS_RE = re.compile(r"^obfs:\n(?:[ \t]+.*\n)*\n?", re.M)
+
+
+def current(text):
+    m = re.search(r"^listen:\s*\S*?:?(\d+)\s*$", text, re.M)
+    port = m.group(1) if m else ""
+    obfs = ""
+    b = OBFS_RE.search(text)
+    if b:
+        pm = re.search(r"^\s+password:\s*(.+?)\s*$", b.group(0), re.M)
+        if pm:
+            v = pm.group(1)
+            obfs = json.loads(v) if v.startswith('"') else v.strip("'")
+    return port, obfs
+
+
+def fetch(base, token, port, obfs):
+    q = urllib.parse.urlencode({"port": port, "obfs": obfs})
+    with urllib.request.urlopen("%s/hy2/node/%s/config?%s" % (base, token, q), timeout=15) as r:
+        return json.load(r)
+
+
+def open_firewall(port):
+    def ok(cmd):
+        return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    if shutil.which("ufw") and b"Status: active" in subprocess.run(["ufw", "status"], stdout=subprocess.PIPE).stdout:
+        ok(["ufw", "allow", "%s/udp" % port])
+    elif shutil.which("firewall-cmd") and ok(["firewall-cmd", "--state"]):
+        ok(["firewall-cmd", "--permanent", "--add-port=%s/udp" % port]) and ok(["firewall-cmd", "--reload"])
+
+
+def write(text, ref):
+    st = os.stat(ref)
+    tmp = ref + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.chown(tmp, st.st_uid, st.st_gid)
+    os.chmod(tmp, st.st_mode & 0o7777)
+    os.replace(tmp, ref)
+
+
+def restart_ok():
+    subprocess.run(["systemctl", "restart", SERVICE])
+    time.sleep(5)
+    return subprocess.run(["systemctl", "is-active", "-q", SERVICE]).returncode == 0
+
+
+def main():
+    text = open(CONF).read()
+    m = re.search(r"^\s+url:\s*(\S+)/hy2/auth/(\S+?)\s*$", text, re.M)
+    if not m:
+        sys.exit("hy2mgr auth url not found in " + CONF)
+    base, token = m.group(1), m.group(2)
+    port, obfs = current(text)
+    want = fetch(base, token, port, obfs)
+    new_port, new_obfs = str(want["listen_port"]), want.get("obfs_password") or ""
+    if (new_port, new_obfs) == (port, obfs):
+        return
+    try:
+        with open(FAILED) as f:
+            if json.load(f) == [new_port, new_obfs]:
+                return  # already failed with these settings; wait until they change in the panel
+    except (OSError, ValueError):
+        pass
+    new = re.sub(r"^listen:.*$", "listen: :" + new_port, text, count=1, flags=re.M)
+    new = OBFS_RE.sub("", new)
+    if new_obfs:
+        block = "obfs:\n  type: salamander\n  salamander:\n    password: %s\n\n" % json.dumps(new_obfs)
+        new = re.sub(r"^auth:", lambda _: block + "auth:", new, count=1, flags=re.M)
+    write(new, CONF)
+    if new_port != port:
+        open_firewall(new_port)
+    if restart_ok():
+        print("applied: port %s -> %s, obfs %s" % (port, new_port, "on" if new_obfs else "off"))
+        fetch(base, token, new_port, new_obfs)  # report the applied state
+    else:
+        write(text, CONF)
+        restart_ok()
+        with open(FAILED, "w") as f:
+            json.dump([new_port, new_obfs], f)
+        sys.exit("hysteria failed to start with the new settings (port %s); rolled back, "
+                 "fix them in the panel (see journalctl -u %s)" % (new_port, SERVICE))
+
+
+if __name__ == "__main__":
+    main()
+AGENT
+  chmod 755 /usr/local/bin/hy2mgr-node-sync
+
+  cat > /etc/systemd/system/hy2mgr-node-sync.service <<'EOF'
+[Unit]
+Description=Apply hy2mgr panel node settings to hysteria
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/hy2mgr-node-sync
+EOF
+  cat > /etc/systemd/system/hy2mgr-node-sync.timer <<'EOF'
+[Unit]
+Description=Poll hy2mgr panel for node settings
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target
+EOF
 }
 
 uninstall() {
@@ -529,8 +661,9 @@ uninstall() {
       rm -rf "$PANEL_DIR/hy2mgr" "$PANEL_DIR/certs" "$PANEL_DIR/.env"
       info "panel removed. Database kept at $PANEL_DIR/data (delete it manually if not needed)";;
     node)
-      systemctl disable --now hysteria-server 2>/dev/null || true
-      rm -f /etc/systemd/system/hysteria-server.service "$HY_BIN" /etc/sysctl.d/99-hysteria.conf
+      systemctl disable --now hy2mgr-node-sync.timer hysteria-server 2>/dev/null || true
+      rm -f /etc/systemd/system/hysteria-server.service /etc/systemd/system/hy2mgr-node-sync.* \
+            /usr/local/bin/hy2mgr-node-sync "$HY_BIN" /etc/sysctl.d/99-hysteria.conf
       rm -rf "$HY_CONF_DIR" "$HY_DATA_DIR"
       info "hysteria removed. Delete the node in the panel as well.";;
     *) die "usage: install.sh uninstall panel|node";;

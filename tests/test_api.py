@@ -218,6 +218,34 @@ class APITest(unittest.TestCase):
         self.assertIn("password: ob", r["yaml"])
         self.assertEqual(self.call("POST", "/api/v1/nodes", {"name": "x", "address": "y", "port": "abc"})[0], 400)
 
+    def test_node_agent_config(self):
+        n = self.add_node(port="8443", obfs_password="ob")
+        self.assertFalse(n["agent_synced"])
+        url = "/hy2/node/%s/config" % n["auth_token"]
+        s, r, _ = self.call("GET", url + "?port=443&obfs=", token=None)
+        self.assertEqual(r, {"listen_port": 8443, "port": "8443", "obfs_password": "ob"})
+        _, n, _ = self.call("GET", "/api/v1/nodes/%d" % n["id"])
+        self.assertEqual((n["agent_port"], n["agent_synced"]), ("443", False))
+        self.assertNotIn("agent_obfs", n)
+        self.call("GET", url + "?port=8443&obfs=ob", token=None)
+        _, n, _ = self.call("GET", "/api/v1/nodes/%d" % n["id"])
+        self.assertTrue(n["agent_synced"])
+        self.call("PATCH", "/api/v1/nodes/%d" % n["id"], {"port": "20000-30000"})
+        self.assertEqual(self.call("GET", url, token=None)[1]["listen_port"], 20000)
+        self.assertEqual(self.call("GET", "/hy2/node/bad/config", token=None)[0], 404)
+
+    def test_migrate_old_db(self):
+        import os, sqlite3, tempfile
+        path = os.path.join(tempfile.mkdtemp(), "old.db")
+        c = sqlite3.connect(path)
+        c.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT NOT NULL, address TEXT NOT NULL, "
+                  "port TEXT NOT NULL DEFAULT '443', auth_token TEXT NOT NULL, created_at INTEGER NOT NULL)")
+        c.execute("INSERT INTO nodes(name,address,auth_token,created_at) VALUES('a','b','t',0)")
+        c.commit()
+        c.close()
+        n = DB(path).get_node(1)
+        self.assertEqual((n["agent_seen_at"], n["agent_port"], n["agent_obfs"]), (0, "", ""))
+
     def test_auto_reset(self):
         self.call("POST", "/api/v1/users", {"username": "mo", "reset_day": 5})
         self.svc.db.update_user("mo", {"upload": 50, "download": 50,
